@@ -1,0 +1,42 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata in this file."
+
+title: "FlashDEG"
+version: "1.0.0"
+license: "MIT"
+repository-code: "https://github.com/tus-kondolab/flashdeg"
+url: "https://github.com/tus-kondolab/flashdeg"
+
+# Uncomment when an actual release date is assigned.
+# date-released: "2026-MM-DD"
+
+# Keep this short; it is shown by GitHub and citation managers.
+abstract: "FlashDEG: A fast, lightweight C++ implementation of DESeq2-compatible differential expression analysis."
+
+keywords:
+  - RNA-seq
+  - differential expression
+  - bioinformatics
+  - gene expression
+  - DESeq2
+
+authors:
+  - family-names: "Kondo"
+    given-names: "Shu"
+    orcid: "https://orcid.org/0000-0002-4625-8379"
+    affiliation: "Tokyo University of Science"
+
+# Uncomment and fill this section once a paper, preprint, or Zenodo DOI exists.
+# doi: "10.0000/zenodo.0000000"
+#
+# preferred-citation:
+#   type: article
+#   title: "PAPER_TITLE"
+#   authors:
+#     - family-names: "FAMILY_NAME"
+#       given-names: "GIVEN_NAME"
+#       # orcid: "https://orcid.org/0000-0000-0000-0000"
+#   journal: "JOURNAL_NAME"
+#   year: 2026
+#   doi: "10.0000/ARTICLE_DOI"
+#   url: "https://example.org/paper"

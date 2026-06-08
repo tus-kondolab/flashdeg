@@ -1,0 +1,4 @@
+Project: PyDESeq2
+Source URL: https://github.com/owkin/PyDESeq2
+Recorded fixture source version: 0.5.4
+Recorded fixture sync date: 2026-05-27

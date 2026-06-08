@@ -1,0 +1,3 @@
+Project: Eigen
+Source URL: https://gitlab.com/libeigen/eigen
+License file: https://gitlab.com/libeigen/eigen/-/blob/master/COPYING.MPL2

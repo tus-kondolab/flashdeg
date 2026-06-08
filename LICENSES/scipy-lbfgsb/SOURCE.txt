@@ -1,0 +1,12 @@
+Project: SciPy
+Component: scipy/optimize L-BFGS-B C translation
+Source files: scipy/optimize/__lbfgsb.c, scipy/optimize/__lbfgsb.h
+Recorded source version: SciPy 1.17.1
+Recorded import date: 2026-05-17
+Source URL: https://github.com/scipy/scipy
+
+Local source hashes after header patching:
+0519789db86a2f80398b6c8e14d081fcd95b6136574388b36751042ea8861f5d  __lbfgsb.c
+
+The exact upstream commit SHA or source-archive hash was not recorded at import
+time. A future refresh should copy from a pinned SciPy source archive.

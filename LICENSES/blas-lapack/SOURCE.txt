@@ -1,0 +1,3 @@
+Project: Reference LAPACK
+Source URL: https://github.com/Reference-LAPACK/lapack
+License file: https://github.com/Reference-LAPACK/lapack/blob/master/LICENSE

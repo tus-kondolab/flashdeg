@@ -1,0 +1,156 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "vcpkg-ninja",
+      "displayName": "Release build with vcpkg, Eigen, Boost.Math, OpenBLAS",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-vcpkg-ninja",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "FLASHDEG_BUILD_TESTS": "ON",
+        "FLASHDEG_USE_EIGEN": "ON",
+        "FLASHDEG_USE_BOOST_MATH": "ON",
+        "FLASHDEG_USE_BLAS": "ON",
+        "FLASHDEG_USE_SCIPY_LBFGSB": "ON",
+        "FLASHDEG_ENABLE_DEV_OPTIONS": "OFF",
+        "FLASHDEG_ALLOW_NO_DEPS_BUILD": "OFF"
+      }
+    },
+    {
+      "name": "dev-vcpkg-ninja",
+      "displayName": "Developer build with vcpkg, Eigen, Boost.Math, OpenBLAS",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-vcpkg-ninja-dev",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "FLASHDEG_BUILD_TESTS": "ON",
+        "FLASHDEG_USE_EIGEN": "ON",
+        "FLASHDEG_USE_BOOST_MATH": "ON",
+        "FLASHDEG_USE_BLAS": "ON",
+        "FLASHDEG_USE_SCIPY_LBFGSB": "ON",
+        "FLASHDEG_ENABLE_DEV_OPTIONS": "ON",
+        "FLASHDEG_ALLOW_NO_DEPS_BUILD": "OFF"
+      }
+    },
+    {
+      "name": "no-deps",
+      "displayName": "Developer fallback build without Eigen, Boost.Math, or BLAS",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-local",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "FLASHDEG_BUILD_TESTS": "ON",
+        "FLASHDEG_USE_EIGEN": "OFF",
+        "FLASHDEG_USE_BOOST_MATH": "OFF",
+        "FLASHDEG_USE_BLAS": "OFF",
+        "FLASHDEG_USE_SCIPY_LBFGSB": "OFF",
+        "FLASHDEG_ENABLE_DEV_OPTIONS": "ON",
+        "FLASHDEG_ALLOW_NO_DEPS_BUILD": "ON"
+      }
+    },
+    {
+      "name": "linux-system",
+      "displayName": "Linux build using system Eigen / Boost.Math / OpenBLAS (apt)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-wsl",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "FLASHDEG_BUILD_TESTS": "ON",
+        "FLASHDEG_USE_EIGEN": "ON",
+        "FLASHDEG_USE_BOOST_MATH": "ON",
+        "FLASHDEG_USE_BLAS": "ON",
+        "FLASHDEG_USE_SCIPY_LBFGSB": "ON",
+        "FLASHDEG_ENABLE_DEV_OPTIONS": "OFF",
+        "FLASHDEG_ALLOW_NO_DEPS_BUILD": "OFF"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-dev-system",
+      "displayName": "Linux developer build using system Eigen / Boost.Math / OpenBLAS (apt)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-wsl-dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "FLASHDEG_BUILD_TESTS": "ON",
+        "FLASHDEG_USE_EIGEN": "ON",
+        "FLASHDEG_USE_BOOST_MATH": "ON",
+        "FLASHDEG_USE_BLAS": "ON",
+        "FLASHDEG_USE_SCIPY_LBFGSB": "ON",
+        "FLASHDEG_ENABLE_DEV_OPTIONS": "ON",
+        "FLASHDEG_ALLOW_NO_DEPS_BUILD": "OFF"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "vcpkg-ninja",
+      "configurePreset": "vcpkg-ninja"
+    },
+    {
+      "name": "dev-vcpkg-ninja",
+      "configurePreset": "dev-vcpkg-ninja"
+    },
+    {
+      "name": "no-deps",
+      "configurePreset": "no-deps"
+    },
+    {
+      "name": "linux-system",
+      "configurePreset": "linux-system"
+    },
+    {
+      "name": "linux-dev-system",
+      "configurePreset": "linux-dev-system"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "vcpkg-ninja",
+      "configurePreset": "vcpkg-ninja",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "dev-vcpkg-ninja",
+      "configurePreset": "dev-vcpkg-ninja",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "no-deps",
+      "configurePreset": "no-deps",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-system",
+      "configurePreset": "linux-system",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-dev-system",
+      "configurePreset": "linux-dev-system",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+SciPy L-BFGS-B vendor copy
+Recorded on: 2026-05-17
+Source files: scipy/optimize/__lbfgsb.c and scipy/optimize/__lbfgsb.h
+
+Source provenance:
+- The FlashDEG PyDESeq2 oracle environment reports SciPy 1.17.1.
+- The vendored C file is recorded as the SciPy 1.17.1 L-BFGS-B C translation.
+- The exact upstream commit SHA or source-archive hash was not recorded at
+  import time, so a future refresh should copy from a pinned SciPy source
+  archive and update this file.
+
+Vendored source hashes after local header patching:
+- __lbfgsb.c: 0519789db86a2f80398b6c8e14d081fcd95b6136574388b36751042ea8861f5d
+- __lbfgsb.h: local wrapper header; Python/Numpy binding code removed and
+  setulb declared with external linkage for direct C/C++ use.
