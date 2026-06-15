@@ -62,6 +62,23 @@ class DesignMatrix {
     std::string_view formula,
     const std::map<std::string, std::string>& ref_levels);
 
+// Result of checking that a reduced design is nested within a full design for a
+// likelihood-ratio test. degrees_of_freedom is the rank difference, i.e. the
+// number of parameters the reduced model drops relative to the full model.
+struct NestedDesignValidation {
+  std::size_t full_rank = 0;
+  std::size_t reduced_rank = 0;
+  std::size_t degrees_of_freedom = 0;
+};
+
+// Validates that `reduced` is nested within `full`: identical samples in the
+// same order, both designs full column rank, and the reduced column space is
+// contained in the full column space (rank([full | reduced]) == rank(full)).
+// Returns the ranks and df = rank(full) - rank(reduced). Throws ccdeseq2::Error
+// on sample mismatch, rank deficiency, non-nestedness, or df == 0.
+[[nodiscard]] NestedDesignValidation validate_nested_designs(
+    const DesignMatrix& full, const DesignMatrix& reduced);
+
 [[nodiscard]] std::vector<double> parse_contrast_vector(std::string_view text);
 
 }  // namespace ccdeseq2

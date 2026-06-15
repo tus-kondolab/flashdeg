@@ -4,12 +4,18 @@
 #include <cctype>
 #include <charconv>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <locale.h>
 #include <sstream>
 #include <string_view>
 #include <system_error>
+
+#if defined(__APPLE__)
+#include <xlocale.h>
+#endif
 
 #include "ccdeseq2/errors.hpp"
 #include "ccdeseq2/file_io.hpp"
@@ -42,6 +48,84 @@ namespace {
     throw Error(ExitCode::input_error, msg.str());
   }
   return value;
+}
+
+[[nodiscard]] double round_half_to_even(double value) {
+  const double lower = std::floor(value);
+  const double fraction = value - lower;
+  if (fraction < 0.5) {
+    return lower;
+  }
+  if (fraction > 0.5) {
+    return lower + 1.0;
+  }
+  return std::fmod(lower, 2.0) == 0.0 ? lower : lower + 1.0;
+}
+
+[[nodiscard]] double parse_tximport_count(std::string_view text,
+                                          const std::filesystem::path& path,
+                                          std::size_t line_number,
+                                          std::string_view sample_name,
+                                          std::string_view gene_name) {
+  const std::string trimmed = trim_copy(text);
+  if (trimmed.empty()) {
+    std::ostringstream msg;
+    msg << path.string() << ":" << line_number
+        << ": empty count for sample '" << sample_name << "', gene '" << gene_name
+        << "'.";
+    throw Error(ExitCode::input_error, msg.str());
+  }
+
+  double value = 0.0;
+  const char* ptr = trimmed.data();
+  const char* last = trimmed.data() + trimmed.size();
+  std::errc ec{};
+#if defined(__APPLE__)
+  locale_t locale = newlocale(LC_NUMERIC_MASK, "C", nullptr);
+  if (locale == nullptr) {
+    ec = std::errc::invalid_argument;
+  } else {
+    char* end = nullptr;
+    value = strtod_l(trimmed.c_str(), &end, locale);
+    freelocale(locale);
+    ptr = end;
+  }
+#else
+  const auto result = std::from_chars(trimmed.data(), last, value);
+  ptr = result.ptr;
+  ec = result.ec;
+#endif
+  if (ec != std::errc() || ptr != last || !std::isfinite(value) ||
+      value < 0.0) {
+    std::ostringstream msg;
+    msg << path.string() << ":" << line_number
+        << ": invalid non-negative numeric count '" << trimmed << "' for sample '"
+        << sample_name << "', gene '" << gene_name << "'.";
+    throw Error(ExitCode::input_error, msg.str());
+  }
+
+  const double rounded = round_half_to_even(value);
+  if (rounded > static_cast<double>(std::numeric_limits<long long>::max())) {
+    std::ostringstream msg;
+    msg << path.string() << ":" << line_number
+        << ": rounded count is out of range for sample '" << sample_name
+        << "', gene '" << gene_name << "'.";
+    throw Error(ExitCode::input_error, msg.str());
+  }
+  return rounded;
+}
+
+[[nodiscard]] double parse_count_value(std::string_view text,
+                                       const std::filesystem::path& path,
+                                       std::size_t line_number,
+                                       std::string_view sample_name,
+                                       std::string_view gene_name,
+                                       CountParseMode mode) {
+  if (mode == CountParseMode::tximport_round) {
+    return parse_tximport_count(text, path, line_number, sample_name, gene_name);
+  }
+  return static_cast<double>(
+      parse_count(text, path, line_number, sample_name, gene_name));
 }
 
 void write_csv_escaped(std::ostream& out, const std::string& value) {
@@ -185,7 +269,8 @@ CsvTable read_csv_table(const std::filesystem::path& path) {
 }
 
 CountMatrix read_count_matrix(const std::filesystem::path& path,
-                              CountOrientation orientation) {
+                              CountOrientation orientation,
+                              CountParseMode mode) {
   CsvTable table = read_csv_table(path);
   std::vector<std::string> column_names(table.header.begin() + 1, table.header.end());
 
@@ -193,9 +278,9 @@ CountMatrix read_count_matrix(const std::filesystem::path& path,
     CountMatrix counts(column_names, table.row_names);
     for (std::size_t gene = 0; gene < table.row_names.size(); ++gene) {
       for (std::size_t sample = 0; sample < column_names.size(); ++sample) {
-        counts(sample, gene) = static_cast<double>(parse_count(
+        counts(sample, gene) = parse_count_value(
             table.rows[gene][sample], path, gene + 2, column_names[sample],
-            table.row_names[gene]));
+            table.row_names[gene], mode);
       }
     }
     return counts;
@@ -204,9 +289,9 @@ CountMatrix read_count_matrix(const std::filesystem::path& path,
   CountMatrix counts(table.row_names, column_names);
   for (std::size_t sample = 0; sample < table.row_names.size(); ++sample) {
     for (std::size_t gene = 0; gene < column_names.size(); ++gene) {
-      counts(sample, gene) = static_cast<double>(parse_count(
+      counts(sample, gene) = parse_count_value(
           table.rows[sample][gene], path, sample + 2, table.row_names[sample],
-          column_names[gene]));
+          column_names[gene], mode);
     }
   }
   return counts;

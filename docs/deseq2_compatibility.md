@@ -13,6 +13,7 @@ FlashDEG supports the core workflow needed for many bulk RNA-seq DEG analyses:
 - dispersion estimation,
 - negative-binomial GLM fitting,
 - Wald-test differential expression,
+- likelihood-ratio tests against a nested reduced model,
 - `baseMean`, `log2FoldChange`, `lfcSE`, `stat`, `pvalue`, and `padj` output,
 - BH adjusted p-values with independent filtering,
 - Cook outlier filtering and optional replacement/refit,
@@ -31,6 +32,7 @@ All features in this table are supported.
 | DESeq2 feature | Compatibility note |
 |---|---|
 | `DESeq(..., test="Wald")` | Standard DEG calling path. |
+| `DESeq(..., test="LRT", reduced=...)` | Likelihood-ratio test of the full design against a nested reduced model (`--test LRT --reduced`). |
 | `results()` Wald table | Outputs the standard result columns: `baseMean`, `log2FoldChange`, `lfcSE`, `stat`, `pvalue`, `padj`. |
 | Size factors: `ratio` | Default size-factor method. |
 | Size factors: `poscounts` | Useful when many genes contain zeros. |
@@ -59,7 +61,7 @@ that rely on external R packages or package-specific optimizer behavior.
 
 | DESeq2 feature | Compatibility boundary |
 |---|---|
-| Dispersion `fitType="local"` | Local trend fitting is available. DESeq2 R uses the external `locfit` package for this path, while FlashDEG uses its own local smoother, so this is not an exact numerical replica of R `locfit`. |
+| Dispersion `fitType="local"` | Local trend fitting uses FlashDEG's own local smoother, which is not an exact numerical replica of R's external `locfit` package, so the fitted dispersion trend can differ slightly. This local path is also entered automatically when the parametric fit fails to converge, so it can affect default `parametric` runs too. |
 | `lfcShrink(type="apeglm")` | Optional post-processing. DESeq2 R delegates this path to the external `apeglm` package, while FlashDEG implements apeGLM-style shrinkage independently; difficult posterior shapes can therefore differ. |
 
 ## Unsupported Features
@@ -68,7 +70,6 @@ that rely on external R packages or package-specific optimizer behavior.
 
 | DESeq2 feature | Impact |
 |---|---|
-| `DESeq(..., test="LRT")` | Likelihood-ratio tests against reduced models are not available, such as testing whether any level of a multi-level factor contributes. Pairwise Wald DEG calling does not require it. |
 | `results(pAdjustMethod != "BH")` | FlashDEG always writes BH-adjusted p-values. DESeq2 R can request other `p.adjust` methods through `results(pAdjustMethod=...)`; those alternatives are not reproduced directly. |
 | `results(filterFun=ihw)` | Independent Hypothesis Weighting (IHW) filtering is not available. Standard independent filtering remains available. |
 
@@ -78,7 +79,7 @@ that rely on external R packages or package-specific optimizer behavior.
 |---|---|
 | Size factors: `iterate` | This specific DESeq2 size-factor estimation method is not available. Standard ratio or poscounts normalization is usually enough for ordinary DEG calling. |
 | External normalization inputs | User-supplied size factors and full normalization-factor matrices cannot be supplied directly. This matters when normalization must exactly reuse values computed outside FlashDEG. |
-| Input preparation helpers | `DESeqDataSetFromTximport`, `DESeqDataSetFromHTSeqCount`, and `collapseReplicates` are not part of FlashDEG. Prepare the count and metadata files before running FlashDEG. |
+| Input preparation helpers | `DESeqDataSetFromHTSeqCount` and `collapseReplicates` are not part of FlashDEG. FlashDEG can read tximport-style estimated counts with `--tximport-round`, but it does not reproduce the `countsFromAbundance="no"` length-offset path. |
 
 ### Dispersion Fitting
 

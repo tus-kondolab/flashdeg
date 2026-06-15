@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <vector>
 
+#include "ccdeseq2/errors.hpp"
 #include "ccdeseq2/pydeseq2_dds.hpp"
 #include "ccdeseq2/pydeseq2_ds.hpp"
 
@@ -131,11 +132,10 @@ void clear_new_all_zeroes_from_cooks(const ByteMask& new_all_zeroes,
 
 }  // namespace
 
-DeseqPipelineResult run_deseq_pipeline(const CountMatrix& counts,
-                                       const DesignMatrix& design_matrix,
-                                       const std::vector<double>& contrast,
-                                       const DeseqPipelineOptions& options,
-                                       ProfileReport* profile) {
+DeseqPipelineResult run_deseq_pipeline(
+    const CountMatrix& counts, const DesignMatrix& design_matrix,
+    const std::vector<double>& contrast, const DeseqPipelineOptions& options,
+    ProfileReport* profile, const DesignMatrix* reduced_design_matrix) {
   DeseqPipelineResult result;
   result.effective_max_disp =
       std::max(options.max_disp, static_cast<double>(counts.sample_count()));
@@ -149,6 +149,20 @@ DeseqPipelineResult run_deseq_pipeline(const CountMatrix& counts,
       options.compute_replacement || (compute_wald && options.cooks_filter);
   const bool compute_replacement =
       options.compute_replacement || options.refit_cooks;
+  const bool compute_lrt = options.test_kind == StatisticalTestKind::lrt;
+  if (compute_lrt && reduced_design_matrix == nullptr) {
+    throw Error(ExitCode::input_error,
+                "LRT was requested but no reduced design matrix was provided.");
+  }
+  if (compute_lrt && options.compute_lfc_shrink) {
+    throw Error(ExitCode::input_error,
+                "LFC shrinkage is not supported with the likelihood-ratio test.");
+  }
+  if (compute_lrt && options.lrt_degrees_of_freedom == 0) {
+    throw Error(ExitCode::input_error,
+                "LRT requires lrt_degrees_of_freedom > 0; set it from "
+                "validate_nested_designs(full, reduced).");
+  }
 
   {
     ScopedProfileTimer timer(profile, "size_factor_ms");
@@ -282,8 +296,44 @@ DeseqPipelineResult run_deseq_pipeline(const CountMatrix& counts,
     }
   }
 
+  // Likelihood-ratio test: fit the reduced model once, after the full model's
+  // counts (Cook replacement on refit genes) and dispersions are final. fit_LFC
+  // consumes NormalizedCounts only for sample-wise size factors, which Cook refit
+  // leaves unchanged, so this single reduced fit matches the full model
+  // gene-for-gene.
+  const CountMatrix* lrt_counts = &counts;
+  CountMatrix lrt_counts_storage;
+  if (compute_lrt && compute_wald) {
+    if (options.refit_cooks && result.replacement.has_value()) {
+      const std::vector<std::size_t> refit_genes =
+          mask_indices(result.replacement->refitted);
+      if (!refit_genes.empty()) {
+        // Use replacement counts ONLY for genes the full model actually refit, so
+        // each gene's response matches the counts its full mu was fit on (safe
+        // even if some genes were replaced but not refit).
+        lrt_counts_storage = counts;
+        for (const std::size_t gene : refit_genes) {
+          for (std::size_t sample = 0; sample < counts.sample_count();
+               ++sample) {
+            lrt_counts_storage(sample, gene) =
+                result.replacement->counts(sample, gene);
+          }
+        }
+        lrt_counts = &lrt_counts_storage;
+      }
+    }
+    ScopedProfileTimer timer(profile, "glm_fit_reduced_ms");
+    result.reduced_lfc = dds::fit_LFC(
+        *lrt_counts, result.normalized, *reduced_design_matrix,
+        result.map->dispersions, result.genewise.non_zero, options.min_mu,
+        options.beta_tol, options.threads, options.deterministic,
+        options.compat_mode);
+  }
+
   if (compute_wald) {
-    ScopedProfileTimer timer(profile, "wald_test_ms");
+    // compute_wald gates the result summary for BOTH the Wald and LRT tests.
+    ScopedProfileTimer timer(profile,
+                             compute_lrt ? "lrt_test_ms" : "wald_test_ms");
     WaldTestOptions wald_options = options.wald_options;
     if (options.compat_mode == CompatMode::deseq2_r) {
       wald_options.ridge_factor = kDefaultRidgeFactor / (kLog2 * kLog2);
@@ -298,9 +348,31 @@ DeseqPipelineResult run_deseq_pipeline(const CountMatrix& counts,
     if (options.refit_cooks && result.replacement.has_value()) {
       wald_options.new_all_zeroes = &result.replacement->new_all_zeroes;
     }
-    result.summary = ds::summary(
-        design_matrix, result.normalized, *result.lfc, result.map->dispersions,
-        result.genewise.non_zero, contrast, wald_options);
+
+    if (compute_lrt) {
+      // Reuse wald_options' compat-adjusted ridge/min_mu and the Cook masks so
+      // the LRT reporting SE and post-processing match the Wald path exactly.
+      LrtTestOptions lrt_options;
+      lrt_options.alpha = wald_options.alpha;
+      lrt_options.degrees_of_freedom = options.lrt_degrees_of_freedom;
+      lrt_options.ridge_factor = wald_options.ridge_factor;
+      lrt_options.min_mu = wald_options.min_mu;
+      lrt_options.cooks_outlier = wald_options.cooks_outlier;
+      lrt_options.new_all_zeroes = wald_options.new_all_zeroes;
+      lrt_options.independent_filter = wald_options.independent_filter;
+      lrt_options.requested_threads = options.threads;
+      lrt_options.deterministic = options.deterministic;
+      lrt_options.compat_mode = options.compat_mode;
+      result.summary = ds::summary_lrt(
+          *lrt_counts, design_matrix, result.normalized, *result.lfc,
+          *result.reduced_lfc, result.map->dispersions,
+          result.genewise.non_zero, contrast, lrt_options);
+    } else {
+      result.summary = ds::summary(
+          design_matrix, result.normalized, *result.lfc,
+          result.map->dispersions, result.genewise.non_zero, contrast,
+          wald_options);
+    }
   }
 
   if (options.compute_lfc_shrink) {

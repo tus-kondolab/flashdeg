@@ -1,0 +1,49 @@
+[package]
+name = "flashdeg-gui"
+version = "1.1.0"
+description = "FlashDEG GUI"
+authors = ["FlashDEG contributors"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "flashdeg_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "flashdeg-gui"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+csv = "1"
+# Cross-platform clipboard with arbitrary formats — lets us write the SVG so
+# PowerPoint / Word / Impress paste it as a vector graphic (the web Clipboard
+# API can't write this format). Win/Mac/Linux.
+clipboard-rs = "0.2"
+# Quote/escape-aware tokenizer for the user's "extra arguments" string. Splits
+# only (no shell, no variable/command expansion), so user-typed extra flags are
+# passed to flashdeg as plain argv — never via a shell. See gui_extra_args_plan.md.
+shell-words = "1"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+# Size-optimized release build. Trades build time for a much smaller binary.
+# NOTE: `panic = "abort"` means `cargo test --release` won't work — run tests in
+# the default (dev) profile, which is unaffected.
+[profile.release]
+opt-level = "z"      # optimize for size
+lto = true           # link-time optimization (cross-crate dead-code removal)
+codegen-units = 1    # maximize optimization (slower build)
+panic = "abort"      # drop unwinding tables
+strip = true         # strip symbols / debug info

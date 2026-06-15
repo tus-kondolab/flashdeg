@@ -12,6 +12,7 @@
 
 #include "ccdeseq2/csv.hpp"
 #include "ccdeseq2/errors.hpp"
+#include "ccdeseq2/linalg.hpp"
 
 namespace ccdeseq2 {
 namespace {
@@ -250,6 +251,12 @@ DesignMatrix build_design_matrix(
   std::vector<InteractionTerm> interaction_terms;
   main_terms.reserve(terms.size());
   for (const auto& term : terms) {
+    if (term == "1") {
+      // Explicit intercept term. The Intercept column is always added below, so
+      // "~ 1" yields an intercept-only design and "~ 1 + x" == "~ x". This makes
+      // intercept-only reduced models (e.g. LRT --reduced "~ 1") expressible.
+      continue;
+    }
     if (term.find(':') == std::string::npos) {
       main_terms.push_back(term);
     } else {
@@ -433,6 +440,63 @@ DesignMatrix build_design_matrix(
     }
   }
   return DesignMatrix(ordered_samples, columns, row_major, factors);
+}
+
+NestedDesignValidation validate_nested_designs(const DesignMatrix& full,
+                                               const DesignMatrix& reduced) {
+  if (full.sample_names() != reduced.sample_names()) {
+    throw Error(ExitCode::input_error,
+                "Full and reduced designs must cover the same samples in the "
+                "same order for a likelihood-ratio test.");
+  }
+  const std::size_t n = full.sample_count();
+  const std::size_t full_cols = full.column_count();
+  const std::size_t reduced_cols = reduced.column_count();
+  if (full_cols == 0 || reduced_cols == 0) {
+    throw Error(ExitCode::input_error,
+                "Full and reduced designs must each have at least one column.");
+  }
+
+  const std::size_t full_rank =
+      matrix_rank(full.values_row_major(), n, full_cols);
+  const std::size_t reduced_rank =
+      matrix_rank(reduced.values_row_major(), n, reduced_cols);
+  if (full_rank < full_cols) {
+    throw Error(ExitCode::input_error,
+                "Full design is rank-deficient; LRT requires a full-rank design "
+                "(drop collinear columns or supply a precomputed matrix).");
+  }
+  if (reduced_rank < reduced_cols) {
+    throw Error(ExitCode::input_error,
+                "Reduced design is rank-deficient; LRT requires a full-rank "
+                "reduced design.");
+  }
+
+  // Nestedness: stacking the reduced columns onto the full design must add no
+  // rank, i.e. the reduced column space is contained in the full column space.
+  const std::size_t combined_cols = full_cols + reduced_cols;
+  std::vector<double> combined(n * combined_cols, 0.0);
+  for (std::size_t row = 0; row < n; ++row) {
+    for (std::size_t col = 0; col < full_cols; ++col) {
+      combined[row * combined_cols + col] = full(row, col);
+    }
+    for (std::size_t col = 0; col < reduced_cols; ++col) {
+      combined[row * combined_cols + full_cols + col] = reduced(row, col);
+    }
+  }
+  const std::size_t combined_rank = matrix_rank(combined, n, combined_cols);
+
+  if (combined_rank != full_rank || reduced_rank >= full_rank) {
+    throw Error(ExitCode::input_error,
+                "--reduced must be nested within --design and have fewer "
+                "effective parameters.");
+  }
+
+  NestedDesignValidation result;
+  result.full_rank = full_rank;
+  result.reduced_rank = reduced_rank;
+  result.degrees_of_freedom = full_rank - reduced_rank;
+  return result;
 }
 
 std::vector<double> parse_contrast_vector(std::string_view text) {

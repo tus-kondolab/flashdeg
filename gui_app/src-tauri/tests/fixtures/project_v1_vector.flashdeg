@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "inputs": {
+    "counts": "counts.csv",
+    "metadata": "metadata.csv"
+  },
+  "design": {
+    "kind": "matrix",
+    "path": "design_matrix.csv",
+    "columns": ["Intercept", "condition[T.B]", "condition[T.C]"]
+  },
+  "contrast": {
+    "kind": "vector",
+    "values": [0, -1, 1]
+  },
+  "ref_levels": {},
+  "options": {
+    "fit_type": "parametric",
+    "size_factors": "ratio",
+    "independent_filter": true,
+    "cooks_filter": true,
+    "refit_cooks": true
+  },
+  "runs": []
+}

@@ -11,6 +11,7 @@
 #include "ccdeseq2/errors.hpp"
 #include "ccdeseq2/executor.hpp"
 #include "ccdeseq2/linalg.hpp"
+#include "ccdeseq2/nb.hpp"
 #include "ccdeseq2/numpy_compat.hpp"
 #include "ccdeseq2/pydeseq2_utils.hpp"
 #include "ccdeseq2/special.hpp"
@@ -366,6 +367,138 @@ WaldSummary summary(const DesignMatrix& design_matrix,
                     const WaldTestOptions& options) {
   return run_wald_test(design_matrix, normalized, lfc, dispersions, non_zero,
                        contrast, options);
+}
+
+WaldSummary summary_lrt(const CountMatrix& counts_for_test,
+                        const DesignMatrix& full_design,
+                        const NormalizedCounts& normalized,
+                        const LFCFit& full_lfc, const LFCFit& reduced_lfc,
+                        const std::vector<double>& dispersions,
+                        const ByteMask& non_zero,
+                        const std::vector<double>& report_contrast,
+                        const LrtTestOptions& options) {
+  const std::size_t genes = normalized.normalized_counts.gene_count();
+  const std::size_t samples = normalized.normalized_counts.sample_count();
+  if (full_lfc.mu.gene_count() != genes || reduced_lfc.mu.gene_count() != genes ||
+      full_lfc.converged.size() != genes ||
+      reduced_lfc.converged.size() != genes || dispersions.size() != genes ||
+      non_zero.size() != genes || counts_for_test.gene_count() != genes ||
+      counts_for_test.sample_count() != samples ||
+      full_lfc.mu.sample_count() != samples ||
+      reduced_lfc.mu.sample_count() != samples ||
+      (options.cooks_outlier != nullptr &&
+       options.cooks_outlier->size() != genes) ||
+      (options.new_all_zeroes != nullptr &&
+       options.new_all_zeroes->size() != genes)) {
+    throw Error(ExitCode::input_error,
+                "LRT summary inputs have inconsistent dimensions.");
+  }
+
+  // 1. Reporting columns (baseMean / log2FoldChange / lfcSE) come from the
+  //    full-model Wald test on the display contrast. Filtering and the Cook /
+  //    new-all-zero masks are disabled here; the LRT overwrites the rest. The
+  //    extra Wald pass is cheap relative to the GLM fits and keeps the existing
+  //    Wald SE path untouched.
+  WaldTestOptions report_opts;
+  report_opts.alpha = options.alpha;
+  report_opts.ridge_factor = options.ridge_factor;
+  report_opts.min_mu = options.min_mu;
+  report_opts.alternative = AlternativeHypothesis::two_sided;
+  report_opts.independent_filter = false;
+  report_opts.cooks_outlier = nullptr;
+  report_opts.new_all_zeroes = nullptr;
+  report_opts.requested_threads = options.requested_threads;
+  report_opts.deterministic = options.deterministic;
+  report_opts.compat_mode = options.compat_mode;
+  WaldSummary result =
+      run_wald_test(full_design, normalized, full_lfc, dispersions, non_zero,
+                    report_contrast, report_opts);
+
+  // 2. LRT statistic and p-value per gene, overwriting the Wald stat / pvalue.
+  const double df = static_cast<double>(options.degrees_of_freedom);
+  const GeneBlockExecutor executor(options.requested_threads,
+                                   options.deterministic);
+  executor.run(genes, [&](GeneBlock block) {
+    for (std::size_t gene = block.begin; gene < block.end; ++gene) {
+      result.statistic[gene] = std::numeric_limits<double>::quiet_NaN();
+      result.pvalue[gene] = std::numeric_limits<double>::quiet_NaN();
+      if (!non_zero[gene]) {
+        continue;
+      }
+      // Evaluate the new-all-zero mask before the NB likelihood: the full and
+      // reduced means need not agree for these genes, so skip the NLL and report
+      // "no evidence" (matches DESeq2's post-replacement override).
+      if (options.new_all_zeroes != nullptr &&
+          (*options.new_all_zeroes)[gene] != 0) {
+        result.lfc_se[gene] = 0.0;
+        result.statistic[gene] = 0.0;
+        result.pvalue[gene] = 1.0;
+        continue;
+      }
+      // Untestable genes stay NA (not pvalue=1) so they leave the BH /
+      // independent-filtering pool, matching DESeq2's LRT behaviour.
+      if (!full_lfc.converged[gene] || !reduced_lfc.converged[gene]) {
+        continue;
+      }
+      const double dispersion = dispersions[gene];
+      if (!std::isfinite(dispersion)) {
+        continue;
+      }
+      const std::span<const double> counts_gene(counts_for_test.gene_data(gene),
+                                                samples);
+      const std::span<const double> mu_full(full_lfc.mu.gene_data(gene), samples);
+      const std::span<const double> mu_reduced(reduced_lfc.mu.gene_data(gene),
+                                               samples);
+      const double full_nll =
+          negative_binomial_nll(counts_gene, mu_full, dispersion);
+      const double reduced_nll =
+          negative_binomial_nll(counts_gene, mu_reduced, dispersion);
+      if (!std::isfinite(full_nll) || !std::isfinite(reduced_nll)) {
+        continue;
+      }
+      // Keep the raw statistic, including small negatives. A correctly nested
+      // model gives statistic >= 0 in theory, but the NB GLM fit can produce a
+      // tiny negative on pathological genes (very low counts, Cook-replaced
+      // cells). DESeq2 reports those raw as well (verified: matches DESeq2 to
+      // ~1e-4 on such genes), so keeping them maximizes compatibility;
+      // chi_square_sf maps any value <= 0 to pvalue = 1. Nestedness itself is
+      // guaranteed upstream by validate_nested_designs.
+      const double statistic = 2.0 * (reduced_nll - full_nll);
+      result.statistic[gene] = statistic;
+      result.pvalue[gene] = chi_square_sf(statistic, df);
+    }
+  });
+
+  // 3. Cook filtering (NaN) then 4. new-all-zero override (pvalue=1), mirroring
+  //    the exact ordering of run_wald_test.
+  if (options.cooks_outlier != nullptr) {
+    for (std::size_t gene = 0; gene < genes; ++gene) {
+      if ((*options.cooks_outlier)[gene] != 0) {
+        result.pvalue[gene] = std::numeric_limits<double>::quiet_NaN();
+      }
+    }
+  }
+  if (options.new_all_zeroes != nullptr) {
+    for (std::size_t gene = 0; gene < genes; ++gene) {
+      if ((*options.new_all_zeroes)[gene] == 0) {
+        continue;
+      }
+      result.lfc_se[gene] = 0.0;
+      result.statistic[gene] = 0.0;
+      result.pvalue[gene] = 1.0;
+    }
+  }
+
+  // 5. Multiple-testing correction on the LRT p-values.
+  if (options.independent_filter) {
+    result.independent_filtering = independent_filtering_summary(
+        result.base_mean, result.pvalue, options.alpha, options.compat_mode);
+    result.padj = result.independent_filtering->padj;
+  } else {
+    result.independent_filtering.reset();
+    result.padj = p_value_adjustment(result.pvalue);
+  }
+  return result;
 }
 
 std::vector<double> contrast_log2_fold_change(

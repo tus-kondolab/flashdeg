@@ -34,6 +34,23 @@ struct WaldTestOptions {
   CompatMode compat_mode = CompatMode::pydeseq2;
 };
 
+// Options for the likelihood-ratio test summary. Carries the WaldTestOptions
+// fields needed to (a) compute the reporting Wald SE for the display contrast
+// and (b) post-process p-values (Cook filtering, new-all-zero override, BH /
+// independent filtering) exactly like the Wald path.
+struct LrtTestOptions {
+  double alpha = 0.05;
+  std::size_t degrees_of_freedom = 1;  // rank(full) - rank(reduced)
+  double ridge_factor = kDefaultRidgeFactor;
+  double min_mu = 0.0;
+  const ByteMask* cooks_outlier = nullptr;
+  const ByteMask* new_all_zeroes = nullptr;
+  bool independent_filter = true;
+  int requested_threads = 1;
+  bool deterministic = true;
+  CompatMode compat_mode = CompatMode::pydeseq2;
+};
+
 struct IndependentFilteringResult {
   std::vector<double> padj;
   std::vector<double> independent_filter_theta;
@@ -85,6 +102,22 @@ namespace ccdeseq2::pydeseq2::ds {
     const LFCFit& lfc, const std::vector<double>& dispersions,
     const ByteMask& non_zero, const std::vector<double>& contrast,
     const WaldTestOptions& options);
+
+// Likelihood-ratio test result table, reusing the WaldSummary shape. baseMean /
+// log2_fold_change / lfc_se come from the full-model Wald reporting contrast,
+// while statistic / pvalue / padj are the LRT (full vs reduced). The LRT
+// statistic is 2*(NLL_reduced - NLL_full) at the shared full-model dispersions,
+// and the p-value is its chi-square survival with options.degrees_of_freedom.
+// counts_for_test supplies the per-gene response used in the NB log-likelihoods
+// (the same counts the full model was fit on, including Cook replacement on
+// refit genes). Non-converged / non-computable genes are left as NaN (NA) so
+// they leave the BH / independent-filtering pool, matching DESeq2.
+[[nodiscard]] WaldSummary summary_lrt(
+    const CountMatrix& counts_for_test, const DesignMatrix& full_design,
+    const NormalizedCounts& normalized, const LFCFit& full_lfc,
+    const LFCFit& reduced_lfc, const std::vector<double>& dispersions,
+    const ByteMask& non_zero, const std::vector<double>& report_contrast,
+    const LrtTestOptions& options);
 
 [[nodiscard]] std::vector<double> contrast_log2_fold_change(
     const LFCFit& fit, const std::vector<double>& contrast);

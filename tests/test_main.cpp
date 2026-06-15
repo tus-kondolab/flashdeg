@@ -6,6 +6,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -16,6 +17,7 @@
 #include "ccdeseq2/errors.hpp"
 #include "ccdeseq2/executor.hpp"
 #include "ccdeseq2/linalg.hpp"
+#include "ccdeseq2/nb.hpp"
 #include "ccdeseq2/numeric_backend.hpp"
 #include "ccdeseq2/normalization.hpp"
 #include "ccdeseq2/numpy_compat.hpp"
@@ -569,6 +571,95 @@ void test_csv_parser() {
           "TSV table row names");
   require(table.rows[1][1] == "4", "TSV table value");
   std::filesystem::remove(tsv_path);
+}
+
+void test_tximport_round_count_parser() {
+  const auto dir = std::filesystem::temp_directory_path();
+  const auto counts_path = dir / "FLASHDEG_tximport_round_counts.csv";
+  {
+    std::ofstream out(counts_path, std::ios::binary);
+    out << "gene_id,s1,s2,s3,s4,s5,s6,s7,s8\n";
+    out << "g1,0.5,1.5,2.5,3.5,4.5,4.499,4.501,1e2\n";
+    out << "g2,1.2,1.8,2.0,0,12,13,14,15\n";
+  }
+
+  bool strict_threw = false;
+  try {
+    (void)ccdeseq2::read_count_matrix(
+        counts_path, ccdeseq2::CountOrientation::features_as_rows);
+  } catch (const ccdeseq2::Error&) {
+    strict_threw = true;
+  }
+  require(strict_threw, "fractional counts rejected by default");
+
+  const auto rounded = ccdeseq2::read_count_matrix(
+      counts_path, ccdeseq2::CountOrientation::features_as_rows,
+      ccdeseq2::CountParseMode::tximport_round);
+  const std::vector<double> expected_g1{0.0, 2.0, 2.0, 4.0,
+                                        4.0, 4.0, 5.0, 100.0};
+  for (std::size_t sample = 0; sample < expected_g1.size(); ++sample) {
+    require_near(rounded(sample, 0), expected_g1[sample], 0.0,
+                 "tximport-round R-compatible half-to-even rounding");
+  }
+  require_near(rounded(0, 1), 1.0, 0.0, "tximport-round 1.2");
+  require_near(rounded(1, 1), 2.0, 0.0, "tximport-round 1.8");
+  require_near(rounded(2, 1), 2.0, 0.0, "tximport-round integer decimal");
+
+  const auto cols_path = dir / "FLASHDEG_tximport_round_cols.csv";
+  {
+    std::ofstream out(cols_path, std::ios::binary);
+    out << "sample_id,g1,g2\n";
+    out << "s1,0.5,1.5\n";
+    out << "s2,2.5,3.5\n";
+  }
+  const auto rounded_cols = ccdeseq2::read_count_matrix(
+      cols_path, ccdeseq2::CountOrientation::features_as_cols,
+      ccdeseq2::CountParseMode::tximport_round);
+  require_near(rounded_cols(0, 0), 0.0, 0.0,
+               "tximport-round features-as-cols g1 s1");
+  require_near(rounded_cols(1, 0), 2.0, 0.0,
+               "tximport-round features-as-cols g1 s2");
+  require_near(rounded_cols(0, 1), 2.0, 0.0,
+               "tximport-round features-as-cols g2 s1");
+  require_near(rounded_cols(1, 1), 4.0, 0.0,
+               "tximport-round features-as-cols g2 s2");
+
+  const auto tiny_path = dir / "FLASHDEG_tximport_round_tiny.csv";
+  {
+    std::ofstream out(tiny_path, std::ios::binary);
+    out << "gene_id,s1\n";
+    out << "g1,1e-310\n";
+  }
+  const auto tiny = ccdeseq2::read_count_matrix(
+      tiny_path, ccdeseq2::CountOrientation::features_as_rows,
+      ccdeseq2::CountParseMode::tximport_round);
+  require_near(tiny(0, 0), 0.0, 0.0, "tximport-round tiny count rounds to zero");
+
+  const std::vector<std::string> invalid_values{
+      "NaN", "Inf", "-1", "", "0x10", "+1.5"};
+  for (std::size_t i = 0; i < invalid_values.size(); ++i) {
+    const auto bad_path =
+        dir / ("FLASHDEG_tximport_round_bad_" + std::to_string(i) + ".csv");
+    {
+      std::ofstream out(bad_path, std::ios::binary);
+      out << "gene_id,s1\n";
+      out << "g1," << invalid_values[i] << "\n";
+    }
+    bool threw = false;
+    try {
+      (void)ccdeseq2::read_count_matrix(
+          bad_path, ccdeseq2::CountOrientation::features_as_rows,
+          ccdeseq2::CountParseMode::tximport_round);
+    } catch (const ccdeseq2::Error&) {
+      threw = true;
+    }
+    require(threw, "tximport-round invalid count rejected");
+    std::filesystem::remove(bad_path);
+  }
+
+  std::filesystem::remove(counts_path);
+  std::filesystem::remove(cols_path);
+  std::filesystem::remove(tiny_path);
 }
 
 void test_trigamma_known_values() {
@@ -1608,6 +1699,429 @@ void test_dispersion_parallel_consistency() {
   }
 }
 
+void test_intercept_only_design_formula() {
+  const ccdeseq2::MetadataTable metadata(
+      {"s1", "s2", "s3", "s4"}, {"batch", "condition"},
+      {{"b1", "ctrl"},
+       {"b1", "trt"},
+       {"b2", "ctrl"},
+       {"b2", "trt"}});
+  const std::vector<std::string> samples{"s1", "s2", "s3", "s4"};
+
+  // "~ 1" and "~1" are intercept-only designs.
+  for (const std::string& formula : std::vector<std::string>{"~ 1", "~1"}) {
+    const auto design =
+        ccdeseq2::build_design_matrix(metadata, samples, formula, {});
+    require(design.column_count() == 1, "intercept-only has one column");
+    require(design.column_names()[0] == "Intercept",
+            "intercept-only column is named Intercept");
+    for (std::size_t s = 0; s < samples.size(); ++s) {
+      require_near(design(s, 0), 1.0, 0.0, "intercept-only values are 1");
+    }
+  }
+
+  // An explicit "1" term is redundant: "~ 1 + batch" == "~ batch + 1" == "~ batch".
+  const auto base =
+      ccdeseq2::build_design_matrix(metadata, samples, "~ batch", {});
+  for (const std::string& formula :
+       std::vector<std::string>{"~ 1 + batch", "~ batch + 1"}) {
+    const auto design =
+        ccdeseq2::build_design_matrix(metadata, samples, formula, {});
+    require(design.column_names() == base.column_names(),
+            "explicit intercept term keeps the same columns");
+    require(design.values_row_major() == base.values_row_major(),
+            "explicit intercept term keeps the same values");
+  }
+
+  // "~ 0" / "~ -1" (no intercept) remain unsupported.
+  for (const std::string& formula : std::vector<std::string>{"~ 0", "~ -1"}) {
+    bool threw = false;
+    try {
+      (void)ccdeseq2::build_design_matrix(metadata, samples, formula, {});
+    } catch (const ccdeseq2::Error& error) {
+      threw = error.code() == ccdeseq2::ExitCode::unsupported;
+    }
+    require(threw, "no-intercept formulas remain unsupported");
+  }
+}
+
+void test_chi_square_sf() {
+  using ccdeseq2::chi_square_sf;
+
+  // Endpoints and invalid arguments.
+  require_near(chi_square_sf(0.0, 1.0), 1.0, 0.0, "chi-square sf at x=0 is 1");
+  require_near(chi_square_sf(-3.0, 5.0), 1.0, 0.0, "chi-square sf for x<0 is 1");
+  require(std::isnan(chi_square_sf(1.0, 0.0)), "chi-square df=0 -> NaN");
+  require(std::isnan(chi_square_sf(1.0, -2.0)), "chi-square df<0 -> NaN");
+  require(std::isnan(chi_square_sf(std::numeric_limits<double>::infinity(), 1.0)),
+          "chi-square non-finite x -> NaN");
+
+  // df=2 closed form: sf(x) = exp(-x/2).
+  for (const double x : {0.5, 1.0, 2.0, 5.0, 10.0, 25.0}) {
+    require_relative_or_absolute_near(chi_square_sf(x, 2.0), std::exp(-0.5 * x),
+                                      1e-11, 1e-300,
+                                      "chi-square df=2 closed form");
+  }
+  // df=4 closed form: sf(x) = exp(-x/2) * (1 + x/2).
+  for (const double x : {0.5, 1.0, 2.0, 5.0, 10.0}) {
+    require_relative_or_absolute_near(chi_square_sf(x, 4.0),
+                                      std::exp(-0.5 * x) * (1.0 + 0.5 * x),
+                                      1e-11, 1e-300,
+                                      "chi-square df=4 closed form");
+  }
+  // df=1: sf(x) = 2 * normal_sf(sqrt(x)), since chi-square(1) = Z^2.
+  for (const double x : {0.25, 1.0, 3.841458820694124, 6.0}) {
+    require_relative_or_absolute_near(chi_square_sf(x, 1.0),
+                                      2.0 * ccdeseq2::normal_sf(std::sqrt(x)),
+                                      1e-10, 1e-12,
+                                      "chi-square df=1 via normal sf");
+  }
+  // Known upper 5% quantiles.
+  require_near(chi_square_sf(3.841458820694124, 1.0), 0.05, 1e-9, "chi df1 95%");
+  require_near(chi_square_sf(5.991464547107979, 2.0), 0.05, 1e-9, "chi df2 95%");
+  require_near(chi_square_sf(18.307038053275146, 10.0), 0.05, 1e-7, "chi df10 95%");
+
+  // Monotone decreasing; tiny in the extreme upper tail.
+  require(chi_square_sf(40.0, 50.0) > chi_square_sf(80.0, 50.0),
+          "chi-square sf decreases in x");
+  const double tiny = chi_square_sf(1.0e6, 10.0);
+  require(tiny >= 0.0 && tiny < 1e-12, "chi-square sf tiny for huge x");
+}
+
+void test_nested_design_validation() {
+  const ccdeseq2::MetadataTable metadata(
+      {"s1", "s2", "s3", "s4", "s5", "s6"}, {"batch", "condition"},
+      {{"b1", "ctrl"},
+       {"b1", "trt"},
+       {"b2", "ctrl"},
+       {"b2", "trt"},
+       {"b1", "ctrl"},
+       {"b2", "trt"}});
+  const std::vector<std::string> samples{"s1", "s2", "s3", "s4", "s5", "s6"};
+
+  const auto full_bc = ccdeseq2::build_design_matrix(
+      metadata, samples, "~ batch + condition", {});
+  const auto reduced_b =
+      ccdeseq2::build_design_matrix(metadata, samples, "~ batch", {});
+  const auto reduced_1 =
+      ccdeseq2::build_design_matrix(metadata, samples, "~ 1", {});
+  const auto full_c =
+      ccdeseq2::build_design_matrix(metadata, samples, "~ condition", {});
+
+  // ~batch+condition vs ~batch: nested, df = 1.
+  const auto v1 = ccdeseq2::validate_nested_designs(full_bc, reduced_b);
+  require(v1.degrees_of_freedom == 1, "df for dropping condition is 1");
+  require(v1.full_rank == 3 && v1.reduced_rank == 2, "nested ranks");
+
+  // ~condition vs ~1: nested, df = 1.
+  const auto v2 = ccdeseq2::validate_nested_designs(full_c, reduced_1);
+  require(v2.degrees_of_freedom == 1, "df for condition vs intercept is 1");
+
+  const auto expect_error = [](const ccdeseq2::DesignMatrix& full,
+                               const ccdeseq2::DesignMatrix& reduced,
+                               const std::string& label) {
+    bool threw = false;
+    try {
+      (void)ccdeseq2::validate_nested_designs(full, reduced);
+    } catch (const ccdeseq2::Error& error) {
+      threw = error.code() == ccdeseq2::ExitCode::input_error;
+    }
+    require(threw, label);
+  };
+
+  // df == 0: identical designs.
+  expect_error(full_bc, full_bc, "identical designs -> df==0 error");
+  // non-nested: ~condition vs ~batch (batch not in span of {1, condition}).
+  expect_error(full_c, reduced_b, "non-nested reduced -> error");
+  // sample mismatch.
+  const ccdeseq2::MetadataTable metadata_small(
+      {"s1", "s2", "s3"}, {"condition"}, {{"ctrl"}, {"trt"}, {"ctrl"}});
+  const auto small_c = ccdeseq2::build_design_matrix(
+      metadata_small, {"s1", "s2", "s3"}, "~ condition", {});
+  expect_error(full_c, small_c, "sample mismatch -> error");
+}
+
+void test_lrt_summary_basic() {
+  const auto root = pyde_reference_fixture_dir();
+  auto counts = ccdeseq2::read_count_matrix(
+      root / "datasets" / "synthetic" / "test_counts.csv",
+      ccdeseq2::CountOrientation::features_as_rows);
+  const auto metadata = ccdeseq2::read_metadata_table(
+      root / "datasets" / "synthetic" / "test_metadata.csv");
+  const auto full = ccdeseq2::build_design_matrix(
+      metadata, counts.sample_names(), "~ condition", {});
+  const auto reduced = ccdeseq2::build_design_matrix(
+      metadata, counts.sample_names(), "~ 1", {});
+  const auto nested = ccdeseq2::validate_nested_designs(full, reduced);
+
+  // Dispersions are fit on the FULL design; full and reduced LFC then share
+  // those dispersions (no Cook refit in this focused unit test).
+  const auto normalized =
+      dds::fit_size_factors(counts, ccdeseq2::SizeFactorFitType::ratio);
+  const double max_disp =
+      std::max(10.0, static_cast<double>(counts.sample_count()));
+  const auto genewise = dds::fit_genewise_dispersions(
+      counts, normalized, full, 0.5, 1e-8, max_disp, 1, true);
+  const auto trend = dds::fit_dispersion_trend(
+      genewise.genewise, genewise.non_zero, normalized.base_means, 1e-8,
+      ccdeseq2::DispersionTrendKind::parametric);
+  const auto prior = dds::fit_dispersion_prior(
+      genewise.genewise, trend.fitted, genewise.non_zero, counts.sample_count(),
+      full.column_count(), 1e-8);
+  const auto map = dds::fit_MAP_dispersions(
+      counts, full, genewise.mu_hat, genewise.genewise, trend.fitted,
+      genewise.non_zero, 1e-8, max_disp, prior.prior_disp_var,
+      prior.squared_logres, 1, true);
+  const auto full_lfc = dds::fit_LFC(counts, normalized, full, map.dispersions,
+                                     genewise.non_zero, 0.5, 1e-8, 1, true);
+  const auto reduced_lfc =
+      dds::fit_LFC(counts, normalized, reduced, map.dispersions,
+                   genewise.non_zero, 0.5, 1e-8, 1, true);
+
+  const auto contrast = full.contrast_vector("condition", "B", "A");
+  ccdeseq2::LrtTestOptions opts;
+  opts.degrees_of_freedom = nested.degrees_of_freedom;
+  opts.min_mu = 0.5;
+  opts.independent_filter = true;
+  const auto summary = ds::summary_lrt(counts, full, normalized, full_lfc,
+                                       reduced_lfc, map.dispersions,
+                                       genewise.non_zero, contrast, opts);
+
+  const double df = static_cast<double>(nested.degrees_of_freedom);
+  double min_raw_stat = 0.0;
+  std::size_t finite_pvalues = 0;
+  for (std::size_t gene = 0; gene < counts.gene_count(); ++gene) {
+    if (!genewise.non_zero[gene]) {
+      require(std::isnan(summary.pvalue[gene]),
+              "all-zero gene has NaN LRT pvalue");
+      continue;
+    }
+    if (!full_lfc.converged[gene] || !reduced_lfc.converged[gene]) {
+      continue;  // NA is allowed for untestable genes.
+    }
+    // Independently recompute the raw LRT statistic from the fitted means.
+    const std::span<const double> y(counts.gene_data(gene),
+                                    counts.sample_count());
+    const std::span<const double> mu_full(full_lfc.mu.gene_data(gene),
+                                          counts.sample_count());
+    const std::span<const double> mu_red(reduced_lfc.mu.gene_data(gene),
+                                         counts.sample_count());
+    const double raw =
+        2.0 * (ccdeseq2::negative_binomial_nll(y, mu_red, map.dispersions[gene]) -
+               ccdeseq2::negative_binomial_nll(y, mu_full, map.dispersions[gene]));
+    if (std::isfinite(raw)) {
+      min_raw_stat = std::min(min_raw_stat, raw);
+    }
+    if (std::isfinite(summary.pvalue[gene])) {
+      ++finite_pvalues;
+      // The reported statistic is the raw 2*(NLL_red - NLL_full) with no
+      // clamping, matching DESeq2 even for small negatives.
+      require_relative_or_absolute_near(
+          summary.statistic[gene], raw, 1e-9, 1e-9,
+          "LRT statistic equals 2*(NLL_red - NLL_full)");
+      require_relative_or_absolute_near(
+          summary.pvalue[gene],
+          ccdeseq2::chi_square_sf(summary.statistic[gene], df), 1e-12, 1e-15,
+          "LRT pvalue == chi_square_sf(stat, df)");
+    }
+  }
+  require(finite_pvalues > 0, "LRT produced finite pvalues");
+  require(min_raw_stat > -1e-6,
+          "raw LRT statistics are non-negative within tolerance");
+
+  // Mask handling: cooks -> NaN, new_all_zeroes -> pvalue=1 override.
+  std::size_t g_cook = counts.gene_count();
+  std::size_t g_zero = counts.gene_count();
+  for (std::size_t gene = 0; gene < counts.gene_count(); ++gene) {
+    if (!genewise.non_zero[gene]) {
+      continue;
+    }
+    if (g_cook == counts.gene_count()) {
+      g_cook = gene;
+    } else if (g_zero == counts.gene_count()) {
+      g_zero = gene;
+      break;
+    }
+  }
+  require(g_cook < counts.gene_count() && g_zero < counts.gene_count(),
+          "found two non-zero genes for mask test");
+  ccdeseq2::ByteMask cooks_mask(counts.gene_count(), 0);
+  ccdeseq2::ByteMask new_all_zero_mask(counts.gene_count(), 0);
+  cooks_mask[g_cook] = 1;
+  new_all_zero_mask[g_zero] = 1;
+  ccdeseq2::LrtTestOptions masked = opts;
+  masked.cooks_outlier = &cooks_mask;
+  masked.new_all_zeroes = &new_all_zero_mask;
+  const auto masked_summary =
+      ds::summary_lrt(counts, full, normalized, full_lfc, reduced_lfc,
+                      map.dispersions, genewise.non_zero, contrast, masked);
+  require(std::isnan(masked_summary.pvalue[g_cook]),
+          "cooks-outlier gene has NaN LRT pvalue");
+  require(masked_summary.pvalue[g_zero] == 1.0,
+          "new-all-zero gene has LRT pvalue 1");
+  require(masked_summary.statistic[g_zero] == 0.0,
+          "new-all-zero gene has LRT statistic 0");
+  require(masked_summary.lfc_se[g_zero] == 0.0,
+          "new-all-zero gene has LRT lfcSE 0");
+}
+
+void test_lrt_pipeline_end_to_end() {
+  const auto root = pyde_reference_fixture_dir();
+  auto counts = ccdeseq2::read_count_matrix(
+      root / "datasets" / "synthetic" / "test_counts.csv",
+      ccdeseq2::CountOrientation::features_as_rows);
+  const auto metadata = ccdeseq2::read_metadata_table(
+      root / "datasets" / "synthetic" / "test_metadata.csv");
+  const auto full = ccdeseq2::build_design_matrix(
+      metadata, counts.sample_names(), "~ condition", {});
+  const auto reduced = ccdeseq2::build_design_matrix(
+      metadata, counts.sample_names(), "~ 1", {});
+  const auto nested = ccdeseq2::validate_nested_designs(full, reduced);
+  const auto contrast = full.contrast_vector("condition", "B", "A");
+
+  ccdeseq2::DeseqPipelineOptions options;
+  options.test_kind = ccdeseq2::StatisticalTestKind::lrt;
+  options.lrt_degrees_of_freedom = nested.degrees_of_freedom;
+  options.wald_options.independent_filter = true;
+  const auto result = ccdeseq2::run_deseq_pipeline(counts, full, contrast,
+                                                   options, nullptr, &reduced);
+  require(result.summary.has_value(), "LRT pipeline produced a summary");
+  require(result.reduced_lfc.has_value(), "LRT pipeline fit a reduced model");
+
+  const double df = static_cast<double>(nested.degrees_of_freedom);
+  std::size_t finite = 0;
+  for (std::size_t gene = 0; gene < counts.gene_count(); ++gene) {
+    const double pv = result.summary->pvalue[gene];
+    if (std::isfinite(pv)) {
+      ++finite;
+      // statistic is raw (small negatives kept to match DESeq2); the pvalue is
+      // its chi-square survival, which is 1 for any non-positive statistic.
+      require_relative_or_absolute_near(
+          pv, ccdeseq2::chi_square_sf(result.summary->statistic[gene], df),
+          1e-12, 1e-15, "pipeline LRT pvalue == chi_square_sf(stat, df)");
+    }
+  }
+  require(finite > 0, "pipeline LRT produced finite pvalues");
+
+  // A Wald run on the same design must be unchanged in shape and must differ in
+  // its test statistics (sanity that the LRT path is actually doing the LRT).
+  ccdeseq2::DeseqPipelineOptions wald_only;
+  wald_only.wald_options.independent_filter = true;
+  const auto wald =
+      ccdeseq2::run_deseq_pipeline(counts, full, contrast, wald_only);
+  require(!wald.reduced_lfc.has_value(), "Wald run does not fit a reduced model");
+  bool differs = false;
+  for (std::size_t gene = 0; gene < counts.gene_count(); ++gene) {
+    const double a = result.summary->pvalue[gene];
+    const double b = wald.summary->pvalue[gene];
+    if (std::isfinite(a) && std::isfinite(b) && std::abs(a - b) > 1e-6) {
+      differs = true;
+    }
+    // baseMean is identical (same full-model normalization).
+    require_relative_or_absolute_near(result.summary->base_mean[gene],
+                                      wald.summary->base_mean[gene], 1e-12,
+                                      1e-12, "LRT and Wald share baseMean");
+  }
+  require(differs, "LRT and Wald pvalues differ on some gene");
+}
+
+void test_lrt_pipeline_rejections() {
+  const auto root = pyde_reference_fixture_dir();
+  auto counts = ccdeseq2::read_count_matrix(
+      root / "datasets" / "synthetic" / "test_counts.csv",
+      ccdeseq2::CountOrientation::features_as_rows);
+  const auto metadata = ccdeseq2::read_metadata_table(
+      root / "datasets" / "synthetic" / "test_metadata.csv");
+  const auto full = ccdeseq2::build_design_matrix(
+      metadata, counts.sample_names(), "~ condition", {});
+  const auto reduced = ccdeseq2::build_design_matrix(
+      metadata, counts.sample_names(), "~ 1", {});
+  const auto contrast = full.contrast_vector("condition", "B", "A");
+
+  const auto expect_throw = [&](const ccdeseq2::DeseqPipelineOptions& opts,
+                                const ccdeseq2::DesignMatrix* red,
+                                const std::string& label) {
+    bool threw = false;
+    try {
+      (void)ccdeseq2::run_deseq_pipeline(counts, full, contrast, opts, nullptr,
+                                         red);
+    } catch (const ccdeseq2::Error&) {
+      threw = true;
+    }
+    require(threw, label);
+  };
+
+  // LRT requested without a reduced design.
+  ccdeseq2::DeseqPipelineOptions no_reduced;
+  no_reduced.test_kind = ccdeseq2::StatisticalTestKind::lrt;
+  no_reduced.lrt_degrees_of_freedom = 1;
+  expect_throw(no_reduced, nullptr, "LRT without reduced design throws");
+
+  // LRT with degrees of freedom left at 0.
+  ccdeseq2::DeseqPipelineOptions zero_df;
+  zero_df.test_kind = ccdeseq2::StatisticalTestKind::lrt;
+  zero_df.lrt_degrees_of_freedom = 0;
+  expect_throw(zero_df, &reduced, "LRT with df==0 throws");
+
+  // LRT combined with LFC shrinkage.
+  ccdeseq2::DeseqPipelineOptions with_shrink;
+  with_shrink.test_kind = ccdeseq2::StatisticalTestKind::lrt;
+  with_shrink.lrt_degrees_of_freedom = 1;
+  with_shrink.compute_lfc_shrink = true;
+  expect_throw(with_shrink, &reduced, "LRT with lfc-shrink throws");
+}
+
+void test_lrt_raw_negative_statistic() {
+  // Construct full/reduced LFC fits where the full-model mean is a deliberately
+  // poor fit and the reduced-model mean is a good fit, so the raw statistic
+  // 2*(NLL_reduced - NLL_full) is negative. summary_lrt must keep the raw
+  // negative statistic (no clamp to 0) with pvalue == 1, matching DESeq2 and
+  // guarding against re-introducing a clamp.
+  const std::vector<std::string> samples{"s1", "s2", "s3", "s4"};
+  const std::vector<std::string> genes{"g1"};
+  ccdeseq2::CountMatrix counts(samples, genes);
+  const double y[4] = {10.0, 12.0, 9.0, 11.0};
+  for (std::size_t s = 0; s < samples.size(); ++s) counts(s, 0) = y[s];
+  const auto normalized =
+      dds::fit_size_factors(counts, ccdeseq2::SizeFactorFitType::ratio);
+
+  // Intercept + x design (2 columns); factors are unused by summary_lrt.
+  const ccdeseq2::DesignMatrix full_design(
+      samples, {"Intercept", "x"}, {1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0}, {});
+
+  const auto make_lfc = [&](double mu_value, double beta1) {
+    ccdeseq2::LFCFit fit;
+    fit.lfc_row_major = {0.0, beta1};
+    fit.mu = ccdeseq2::CountMatrix(samples, genes);
+    fit.hat_diagonals = ccdeseq2::CountMatrix(samples, genes);
+    for (std::size_t s = 0; s < samples.size(); ++s) {
+      fit.mu(s, 0) = mu_value;
+      fit.hat_diagonals(s, 0) = 0.0;
+    }
+    fit.converged = ccdeseq2::ByteMask{1};
+    fit.iterations = {1.0};
+    fit.fallback = ccdeseq2::ByteMask{0};
+    return fit;
+  };
+  const auto full_lfc = make_lfc(30.0, 0.5);     // poor fit (mu >> counts)
+  const auto reduced_lfc = make_lfc(10.5, 0.0);  // good fit (mu ~ counts)
+
+  const std::vector<double> dispersions{0.1};
+  const ccdeseq2::ByteMask non_zero{1};
+  const std::vector<double> contrast{0.0, 1.0};
+  ccdeseq2::LrtTestOptions opts;
+  opts.degrees_of_freedom = 1;
+  opts.independent_filter = false;
+
+  const auto summary =
+      ds::summary_lrt(counts, full_design, normalized, full_lfc, reduced_lfc,
+                      dispersions, non_zero, contrast, opts);
+  require(summary.statistic[0] < 0.0,
+          "raw negative LRT statistic is preserved (not clamped to 0)");
+  require(summary.pvalue[0] == 1.0,
+          "negative LRT statistic yields pvalue 1");
+}
+
 }  // namespace
 
 int main() {
@@ -1621,6 +2135,7 @@ int main() {
     test_shrinkage_loss_formula();
     test_nbinom_glm_compat_mode_shrinkage_semantics();
     test_csv_parser();
+    test_tximport_round_count_parser();
     test_trigamma_known_values();
     test_nb_nll_derivative_alpha();
     test_bh_adjustment();
@@ -1634,6 +2149,13 @@ int main() {
     test_output_writers_create_parent_directories();
     test_counts_design_and_size_factors();
     test_design_interaction();
+    test_intercept_only_design_formula();
+    test_chi_square_sf();
+    test_nested_design_validation();
+    test_lrt_summary_basic();
+    test_lrt_pipeline_end_to_end();
+    test_lrt_pipeline_rejections();
+    test_lrt_raw_negative_statistic();
     test_executor_blocks();
     test_profile_json_schema();
     test_mom_dispersions();

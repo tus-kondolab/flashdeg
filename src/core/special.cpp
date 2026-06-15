@@ -77,6 +77,74 @@ namespace {
   return 1.0 - bt * regularized_beta_cf(b, a, 1.0 - x) / b;
 }
 
+[[nodiscard]] double regularized_gamma_p_series(double a, double x) {
+  // Lower regularized incomplete gamma P(a, x) via series expansion
+  // (Numerical Recipes, gser). Valid for x < a + 1.
+  constexpr int kMaxIterations = 300;
+  constexpr double kEps = 3e-14;
+  if (x <= 0.0) {
+    return 0.0;
+  }
+  double ap = a;
+  double sum = 1.0 / a;
+  double del = sum;
+  for (int n = 0; n < kMaxIterations; ++n) {
+    ap += 1.0;
+    del *= x / ap;
+    sum += del;
+    if (std::abs(del) < std::abs(sum) * kEps) {
+      break;
+    }
+  }
+  return sum * std::exp(-x + a * std::log(x) - std::lgamma(a));
+}
+
+[[nodiscard]] double regularized_gamma_q_cf(double a, double x) {
+  // Upper regularized incomplete gamma Q(a, x) via continued fraction
+  // (Numerical Recipes, gcf). Valid for x >= a + 1.
+  constexpr int kMaxIterations = 300;
+  constexpr double kEps = 3e-14;
+  constexpr double kFpMin = 1e-300;
+  double b = x + 1.0 - a;
+  double c = 1.0 / kFpMin;
+  double d = 1.0 / b;
+  double h = d;
+  for (int i = 1; i <= kMaxIterations; ++i) {
+    const double an = -static_cast<double>(i) * (static_cast<double>(i) - a);
+    b += 2.0;
+    d = an * d + b;
+    if (std::abs(d) < kFpMin) {
+      d = kFpMin;
+    }
+    c = b + an / c;
+    if (std::abs(c) < kFpMin) {
+      c = kFpMin;
+    }
+    d = 1.0 / d;
+    const double del = d * c;
+    h *= del;
+    if (std::abs(del - 1.0) < kEps) {
+      break;
+    }
+  }
+  return std::exp(-x + a * std::log(x) - std::lgamma(a)) * h;
+}
+
+// Dependency-free upper regularized incomplete gamma Q(a, x), used as the
+// chi-square survival fallback when Boost.Math is unavailable.
+[[nodiscard]] double regularized_gamma_q(double a, double x) {
+  if (!std::isfinite(a) || !std::isfinite(x) || a <= 0.0 || x < 0.0) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  if (x == 0.0) {
+    return 1.0;
+  }
+  if (x < a + 1.0) {
+    return 1.0 - regularized_gamma_p_series(a, x);
+  }
+  return regularized_gamma_q_cf(a, x);
+}
+
 }  // namespace
 
 double gammaln(double x) {
@@ -204,6 +272,22 @@ double f_distribution_quantile(double probability, double numerator_df,
     }
   }
   return 0.5 * (lo + hi);
+#endif
+}
+
+double chi_square_sf(double x, double degrees_of_freedom) {
+  if (!std::isfinite(x) || !std::isfinite(degrees_of_freedom) ||
+      degrees_of_freedom <= 0.0) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  if (x <= 0.0) {
+    return 1.0;
+  }
+  // chi-square(k) survival = Q(k/2, x/2), the upper regularized incomplete gamma.
+#ifdef FLASHDEG_HAVE_BOOST_MATH
+  return boost::math::gamma_q(0.5 * degrees_of_freedom, 0.5 * x);
+#else
+  return regularized_gamma_q(0.5 * degrees_of_freedom, 0.5 * x);
 #endif
 }
 

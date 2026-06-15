@@ -14,6 +14,11 @@ struct CsvTable {
   std::vector<std::vector<std::string>> rows;
 };
 
+enum class CountParseMode {
+  strict_integer,
+  tximport_round,
+};
+
 [[nodiscard]] std::string trim_copy(std::string_view text);
 [[nodiscard]] std::vector<std::string> parse_csv_line(std::string_view line,
                                                       char delimiter = ',');
@@ -24,7 +29,9 @@ struct CsvTable {
 
 [[nodiscard]] CsvTable read_csv_table(const std::filesystem::path& path);
 [[nodiscard]] CountMatrix read_count_matrix(const std::filesystem::path& path,
-                                            CountOrientation orientation);
+                                            CountOrientation orientation,
+                                            CountParseMode mode =
+                                                CountParseMode::strict_integer);
 [[nodiscard]] MetadataTable read_metadata_table(const std::filesystem::path& path);
 
 void write_matrix_csv(const std::filesystem::path& path,

@@ -42,6 +42,7 @@ controls the reference level used in the design matrix.
 | `--counts <path>` | Count matrix. Required. FlashDEG expects genes/features as rows and samples as columns by default. `.tsv` and `.tab` extensions are read as tab-delimited files. |
 | `--metadata <path>` | Sample metadata table. Required. `.tsv` and `.tab` extensions are read as tab-delimited files. |
 | `--features-as-cols` | Read counts as samples x genes instead of the default genes x samples layout. |
+| `--tximport-round` | Allow non-integer estimated counts and round them with R-compatible half-to-even rounding before analysis. Intended for tximport counts generated with `countsFromAbundance="scaledTPM"` or `"lengthScaledTPM"`; length-offset normalization is not applied. |
 
 The first column of the counts file is treated as the gene ID column.
 The first column of the metadata file is treated as the sample ID column.
@@ -107,6 +108,91 @@ flashdeg run \
   --design-matrix design_matrix.csv \
   --contrast-vector "0,1" \
   --out results.csv
+```
+
+## Likelihood-Ratio Test (LRT)
+
+By default `flashdeg run` performs a Wald test. Pass `--test LRT` to compare the
+full `--design` against a nested `--reduced` model instead. The LRT is useful for
+testing whether *any* level of a multi-level factor contributes, or whether an
+interaction as a whole is supported.
+
+| Option | Description |
+|---|---|
+| `--test Wald\|LRT` | Statistical test for the result table. Default: `Wald`. |
+| `--reduced <formula>` | Nested reduced-model formula (use with a `--design` formula). Example: `"~ 1"` or `"~ batch"`. |
+| `--reduced-design-matrix <path>` | Nested reduced design matrix (use with `--design-matrix`). |
+
+The reduced model must be nested within the full model and have fewer effective
+parameters; FlashDEG validates this and uses the rank difference as the test
+degrees of freedom. An intercept-only reduced model is written `"~ 1"`.
+
+**The contrast is for display only under LRT.** One of `--contrast`,
+`--contrast-name`, or `--contrast-vector` is still required, but it only selects
+the `log2FoldChange` and `lfcSE` reported in the table. The `stat` and `pvalue`
+test the full design against the reduced design (all dropped terms jointly), so
+they are not described by the single displayed contrast.
+
+Output columns are unchanged
+(`gene_id,baseMean,log2FoldChange,lfcSE,stat,pvalue,padj`). Under LRT, `stat` is
+the likelihood-ratio statistic `2*(logLik_full - logLik_reduced)` and `pvalue` is
+its chi-square survival probability at the test degrees of freedom.
+
+`--test LRT` cannot be combined with `--lfc-shrink`, `--lfc-null`, or
+`--alt-hypothesis`, which are Wald-only.
+
+### LRT Examples
+
+Test the whole `condition` factor against an intercept-only model:
+
+```bash
+flashdeg run \
+  --counts counts.csv \
+  --metadata metadata.csv \
+  --design "~ condition" \
+  --test LRT \
+  --reduced "~ 1" \
+  --contrast "condition" "treated" "control" \
+  --out lrt_results.csv
+```
+
+Test `condition` while keeping `batch` in both models:
+
+```bash
+flashdeg run \
+  --counts counts.csv \
+  --metadata metadata.csv \
+  --design "~ batch + condition" \
+  --test LRT \
+  --reduced "~ batch" \
+  --contrast "condition" "treated" "control" \
+  --out lrt_results.csv
+```
+
+Test an interaction term as a whole:
+
+```bash
+flashdeg run \
+  --counts counts.csv \
+  --metadata metadata.csv \
+  --design "~ genotype + treatment + genotype:treatment" \
+  --test LRT \
+  --reduced "~ genotype + treatment" \
+  --contrast-name "genotype[T.KO]:treatment[T.drug]" \
+  --out interaction_lrt.csv
+```
+
+With precomputed design matrices, pass both the full and reduced matrices:
+
+```bash
+flashdeg run \
+  --counts counts.csv \
+  --metadata metadata.csv \
+  --design-matrix full_design.csv \
+  --reduced-design-matrix reduced_design.csv \
+  --test LRT \
+  --contrast-name "condition[T.treated]" \
+  --out lrt_results.csv
 ```
 
 ## Analysis Mode And Numerical Options

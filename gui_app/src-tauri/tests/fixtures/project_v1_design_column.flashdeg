@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "inputs": {
+    "counts": "counts.csv",
+    "metadata": "metadata.csv"
+  },
+  "design": {
+    "kind": "formula",
+    "formula": "~ genotype * treatment"
+  },
+  "contrast": {
+    "kind": "design_column",
+    "name": "genotype[T.KO]:treatment[T.drug]"
+  },
+  "ref_levels": {
+    "genotype": "WT",
+    "treatment": "ctrl"
+  },
+  "options": {
+    "fit_type": "parametric",
+    "size_factors": "ratio",
+    "independent_filter": true,
+    "cooks_filter": true,
+    "refit_cooks": true
+  },
+  "runs": []
+}

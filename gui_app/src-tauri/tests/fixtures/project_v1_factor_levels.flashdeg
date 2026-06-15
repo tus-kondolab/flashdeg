@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "inputs": {
+    "counts": "counts.csv",
+    "metadata": "metadata.csv"
+  },
+  "design": {
+    "kind": "formula",
+    "formula": "~ condition"
+  },
+  "contrast": {
+    "kind": "factor_levels",
+    "factor": "condition",
+    "test": "treated",
+    "control": "control"
+  },
+  "ref_levels": {
+    "condition": "control"
+  },
+  "options": {
+    "fit_type": "parametric",
+    "size_factors": "ratio",
+    "independent_filter": true,
+    "cooks_filter": true,
+    "refit_cooks": true
+  },
+  "runs": []
+}

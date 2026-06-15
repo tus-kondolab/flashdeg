@@ -30,6 +30,27 @@ exports the low-level `setulb` routine for direct C/C++ use.
 SciPy code. It is used only when the selected BLAS/LAPACK backend does not
 provide the LAPACK Fortran ABI symbols required by the vendored L-BFGS-B code.
 
+### GUI gene-symbol maps (Ensembl: human, Drosophila)
+
+The desktop GUI ships gene-ID → gene-symbol lookup tables as external files in a
+`gene_maps/` folder next to the application (not embedded in the executable),
+used only to offer a gene-ID ↔ symbol display toggle in the results view:
+
+- `gui_app/gene_maps/gene_symbols_human.tsv.gz` — human (Ensembl ENSG ↔ symbol).
+- `gui_app/gene_maps/gene_symbols_fly.tsv.gz` — *Drosophila melanogaster*
+  (FlyBase FBgn ↔ symbol).
+
+Both are generated from Ensembl BioMart by `gui_app/scripts/fetch-gene-symbols.ps1`
+(datasets `hsapiens_gene_ensembl` / `dmelanogaster_gene_ensembl`, attributes
+`ensembl_gene_id` + `external_gene_name`).
+
+- Source: Ensembl (https://www.ensembl.org), GRCh38 (human) and BDGP6 (fly).
+- Ensembl genome-annotation data is freely available for use; gene display
+  names are largely HGNC-derived (human) / FlyBase-derived (Drosophila). See
+  Ensembl's terms: https://www.ensembl.org/info/about/legal/disclaimer.html
+- The files are data only (no code) and are used for display in the GUI; they
+  do not affect any analysis result.
+
 ## External Build And Runtime Dependencies
 
 FlashDEG release builds normally use the following external dependencies. These

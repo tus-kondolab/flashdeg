@@ -128,6 +128,7 @@ struct RunOptions {
   std::filesystem::path counts_path;
   std::filesystem::path metadata_path;
   std::filesystem::path design_matrix_path;
+  std::filesystem::path reduced_design_matrix_path;
   std::filesystem::path out_path;
   std::filesystem::path write_design_matrix_path;
   std::filesystem::path write_size_factors_path;
@@ -169,6 +170,8 @@ struct RunOptions {
   std::string fit_type = "parametric";
   std::string vst_fit_type = "parametric";
   std::string lfc_shrink_coef;
+  std::string test_kind = "Wald";
+  std::string reduced_formula;
   ccdeseq2::CompatMode compat_mode = ccdeseq2::CompatMode::pydeseq2;
   std::map<std::string, std::string> ref_levels;
   ccdeseq2::CountOrientation orientation =
@@ -191,6 +194,10 @@ struct RunOptions {
   bool quiet = false;
   bool dry_run = false;
   bool design_provided = false;
+  bool reduced_provided = false;
+  bool reduced_design_matrix_provided = false;
+  bool lfc_null_provided = false;
+  bool alt_hypothesis_provided = false;
   bool alpha_provided = false;
   bool independent_filter = true;
   bool cooks_filter = true;
@@ -200,28 +207,30 @@ struct RunOptions {
   bool vst_use_design_requested = false;
   bool compute_lfc_shrink = false;
   bool lfc_shrink_adapt = true;
+  bool tximport_round = false;
 };
 
 [[nodiscard]] std::string usage() {
-  return R"(FlashDEG 1.0.0
+  return R"(FlashDEG 1.1.0
 
 Usage:
+  flashdeg <command> [options]
   flashdeg --help
   flashdeg --version
   flashdeg --build-info
-  flashdeg run --counts counts.csv --metadata metadata.csv --design "~ condition" --contrast "condition" "B" "A" --dry-run
 
-Implemented in this milestone:
-  - CSV / TSV validation for genes x samples and samples x genes inputs
-    (TSV auto-detected from .tsv or .tab extension, case-insensitive)
-  - formula subset design matrix construction
-  - contrast vector construction
-  - ratio / poscounts size-factor fitting
-  - single-factor dispersion debug outputs through parametric trend / MAP
-  - LFC IRLS debug outputs for natural-log betas, mu_LFC and hat diagonals
-  - Wald summary CSV with BH/independent-filtered adjusted p-values
-  - Cook distance p-value filtering, refit and debug outputs
-  - profile text / JSON output
+Commands:
+  run                 Run differential expression analysis
+
+Global options:
+  -h, --help          Show this help
+  --version           Show the FlashDEG version
+  --build-info        Show build information
+
+Example:
+  flashdeg run --counts counts.csv --metadata metadata.csv --design "~ condition" --ref-level "condition=control" --contrast "condition" "treated" "control" --out results.csv
+
+Use "flashdeg run --help" for analysis options.
 )";
 }
 
@@ -243,8 +252,22 @@ Required:
   --contrast-vector <comma-separated doubles>
                                              Advanced: numeric contrast for design matrix
 
+Likelihood-ratio test (optional):
+  --test Wald|LRT                            Statistical test (default: Wald).
+  --reduced <formula>                        Nested reduced model for --test LRT,
+                                             e.g. "~ 1" or "~ batch".
+  --reduced-design-matrix <path>             Reduced precomputed matrix (use with
+                                             --design-matrix).
+                                             For LRT, --contrast/--contrast-name/
+                                             --contrast-vector selects the displayed
+                                             log2FoldChange only; pvalue/stat test
+                                             the full design against the reduced one.
+
 Key options:
   --features-as-cols        Counts are samples x genes (default: genes x samples)
+  --tximport-round          Allow non-integer estimated counts and round them
+                            with R-compatible half-to-even rounding before
+                            analysis; does not read tximport length offsets
   --ref-level <metadata-column=reference-group>
   --size-factors ratio|poscounts
   --write-size-factors <path>
@@ -603,11 +626,21 @@ void write_independent_filtering_csv(
       options.metadata_path = require_value(args, i, arg);
     } else if (arg == "--features-as-cols") {
       options.orientation = ccdeseq2::CountOrientation::features_as_cols;
+    } else if (arg == "--tximport-round") {
+      options.tximport_round = true;
     } else if (arg == "--design") {
       options.design_formula = require_value(args, i, arg);
       options.design_provided = true;
     } else if (arg == "--design-matrix") {
       options.design_matrix_path = require_value(args, i, arg);
+    } else if (arg == "--test") {
+      options.test_kind = require_value(args, i, arg);
+    } else if (arg == "--reduced") {
+      options.reduced_formula = require_value(args, i, arg);
+      options.reduced_provided = true;
+    } else if (arg == "--reduced-design-matrix") {
+      options.reduced_design_matrix_path = require_value(args, i, arg);
+      options.reduced_design_matrix_provided = true;
     } else if (arg == "--compat-mode") {
 #if FLASHDEG_ENABLE_DEV_OPTIONS
       const std::string value = require_value(args, i, arg);
@@ -759,9 +792,11 @@ void write_independent_filtering_csv(
       options.alpha_provided = true;
     } else if (arg == "--lfc-null") {
       options.lfc_null = parse_double_option(require_value(args, i, arg), arg);
+      options.lfc_null_provided = true;
     } else if (arg == "--alt-hypothesis") {
       options.alt_hypothesis =
           parse_alt_hypothesis(require_value(args, i, arg));
+      options.alt_hypothesis_provided = true;
     } else if (arg == "--refit-cooks") {
       options.refit_cooks = parse_bool_option(require_value(args, i, arg), arg);
     } else if (arg == "--cooks-filter") {
@@ -839,6 +874,55 @@ void write_independent_filtering_csv(
       !options.independent_filter) {
     throw Error(ExitCode::input_error,
                 "--write-independent-filtering requires --independent-filter true.");
+  }
+
+  // Likelihood-ratio test option validation.
+  const bool is_lrt = options.test_kind == "LRT" || options.test_kind == "lrt";
+  const bool is_wald = options.test_kind == "Wald" || options.test_kind == "wald";
+  if (!is_lrt && !is_wald) {
+    throw Error(ExitCode::input_error, "--test must be Wald or LRT.");
+  }
+  if (!is_lrt) {
+    if (options.reduced_provided || options.reduced_design_matrix_provided) {
+      throw Error(ExitCode::input_error,
+                  "--reduced / --reduced-design-matrix require --test LRT.");
+    }
+  } else {
+    if (options.reduced_provided && options.reduced_design_matrix_provided) {
+      throw Error(
+          ExitCode::input_error,
+          "--reduced and --reduced-design-matrix are mutually exclusive.");
+    }
+    if (!options.reduced_provided && !options.reduced_design_matrix_provided) {
+      throw Error(ExitCode::input_error,
+                  "--test LRT requires --reduced <formula> or "
+                  "--reduced-design-matrix <path>.");
+    }
+    if (!options.design_matrix_path.empty()) {
+      // A precomputed full design must pair with a precomputed reduced design.
+      if (!options.reduced_design_matrix_provided) {
+        throw Error(ExitCode::input_error,
+                    "--test LRT with --design-matrix requires "
+                    "--reduced-design-matrix.");
+      }
+    } else {
+      // A formula full design must pair with a formula reduced design.
+      if (!options.reduced_provided) {
+        throw Error(ExitCode::input_error,
+                    "--test LRT with a formula design requires --reduced "
+                    "<formula> (use --reduced-design-matrix only with "
+                    "--design-matrix).");
+      }
+    }
+    if (options.compute_lfc_shrink) {
+      throw Error(ExitCode::input_error,
+                  "--lfc-shrink is not supported with --test LRT.");
+    }
+    if (options.lfc_null_provided || options.alt_hypothesis_provided) {
+      throw Error(ExitCode::input_error,
+                  "--lfc-null and --alt-hypothesis are Wald-only and cannot be "
+                  "combined with --test LRT.");
+    }
   }
   return options;
 }
@@ -933,7 +1017,10 @@ int run_command(const std::vector<std::string>& args) {
   ccdeseq2::CountMatrix counts;
   {
     ccdeseq2::ScopedProfileTimer timer(profile_ptr, "load_counts_ms");
-    counts = ccdeseq2::read_count_matrix(options.counts_path, options.orientation);
+    counts = ccdeseq2::read_count_matrix(
+        options.counts_path, options.orientation,
+        options.tximport_round ? ccdeseq2::CountParseMode::tximport_round
+                               : ccdeseq2::CountParseMode::strict_integer);
   }
 
   ccdeseq2::MetadataTable metadata;
@@ -974,6 +1061,27 @@ int run_command(const std::vector<std::string>& args) {
   if (contrast.size() != design.column_count()) {
     throw Error(ExitCode::input_error,
                 "Contrast vector length does not match design matrix columns.");
+  }
+
+  // Likelihood-ratio test: build the nested reduced design and validate that it
+  // sits inside the full design (the rank difference becomes the LRT df). The
+  // contrast above is reused purely for the displayed log2FoldChange.
+  const bool is_lrt =
+      options.test_kind == "LRT" || options.test_kind == "lrt";
+  std::optional<ccdeseq2::DesignMatrix> reduced_design;
+  std::size_t lrt_degrees_of_freedom = 0;
+  if (is_lrt) {
+    if (!options.reduced_design_matrix_path.empty()) {
+      reduced_design = read_design_matrix_for_samples(
+          options.reduced_design_matrix_path, counts.sample_names());
+    } else {
+      reduced_design = ccdeseq2::build_design_matrix(
+          metadata, counts.sample_names(), options.reduced_formula,
+          options.ref_levels);
+    }
+    const auto nested =
+        ccdeseq2::validate_nested_designs(design, *reduced_design);
+    lrt_degrees_of_freedom = nested.degrees_of_freedom;
   }
 
   const bool need_mom_outputs = !options.write_rough_dispersions_path.empty() ||
@@ -1067,8 +1175,13 @@ int run_command(const std::vector<std::string>& args) {
     pipeline_options.wald_options.alternative = options.alt_hypothesis;
     pipeline_options.wald_options.independent_filter =
         options.independent_filter;
-    pipeline = ccdeseq2::run_deseq_pipeline(counts, design, contrast,
-                                            pipeline_options, profile_ptr);
+    if (is_lrt) {
+      pipeline_options.test_kind = ccdeseq2::StatisticalTestKind::lrt;
+      pipeline_options.lrt_degrees_of_freedom = lrt_degrees_of_freedom;
+    }
+    pipeline = ccdeseq2::run_deseq_pipeline(
+        counts, design, contrast, pipeline_options, profile_ptr,
+        reduced_design ? &*reduced_design : nullptr);
   } else {
     ccdeseq2::ScopedProfileTimer timer(profile_ptr, "size_factor_ms");
     normalized_only =

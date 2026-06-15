@@ -19,6 +19,30 @@
       }
     },
     {
+      "name": "vcpkg-ninja-static",
+      "displayName": "Static release build: static OpenBLAS + static CRT (no runtime DLLs)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-vcpkg-static",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static",
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>",
+        "FLASHDEG_BUILD_TESTS": "ON",
+        "FLASHDEG_USE_EIGEN": "ON",
+        "FLASHDEG_USE_BOOST_MATH": "ON",
+        "FLASHDEG_USE_BLAS": "ON",
+        "FLASHDEG_USE_SCIPY_LBFGSB": "ON",
+        "FLASHDEG_ENABLE_DEV_OPTIONS": "OFF",
+        "FLASHDEG_ALLOW_NO_DEPS_BUILD": "OFF"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
       "name": "dev-vcpkg-ninja",
       "displayName": "Developer build with vcpkg, Eigen, Boost.Math, OpenBLAS",
       "generator": "Ninja",
@@ -100,6 +124,10 @@
       "configurePreset": "vcpkg-ninja"
     },
     {
+      "name": "vcpkg-ninja-static",
+      "configurePreset": "vcpkg-ninja-static"
+    },
+    {
       "name": "dev-vcpkg-ninja",
       "configurePreset": "dev-vcpkg-ninja"
     },
@@ -120,6 +148,13 @@
     {
       "name": "vcpkg-ninja",
       "configurePreset": "vcpkg-ninja",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "vcpkg-ninja-static",
+      "configurePreset": "vcpkg-ninja-static",
       "output": {
         "outputOnFailure": true
       }

@@ -22,6 +22,9 @@ Compare treated samples against control samples.
 Report log2(treated/control).
 ```
 
+Use at least three biological replicates per group for ordinary differential
+expression analysis. The examples below follow that rule.
+
 ## 1. The Metadata File
 
 The metadata file describes each sample.
@@ -244,9 +247,13 @@ Metadata:
 ```csv
 sample,condition,batch
 s1,CNTL,batch1
-s2,CNTL,batch2
-s3,TREATED,batch1
-s4,TREATED,batch2
+s2,CNTL,batch1
+s3,CNTL,batch2
+s4,CNTL,batch2
+s5,TREATED,batch1
+s6,TREATED,batch1
+s7,TREATED,batch2
+s8,TREATED,batch2
 ```
 
 Command:
@@ -275,6 +282,8 @@ Suppose the metadata has:
 ```text
 condition = control, breast, ovary, lung
 ```
+
+Each group should have at least three biological replicates.
 
 To compare each disease group against control, run one command per comparison:
 
@@ -321,9 +330,17 @@ Example:
 ```csv
 sample,condition,cancer_status
 s1,control,control
-s2,breast,cancer
-s3,ovary,cancer
-s4,lung,cancer
+s2,control,control
+s3,control,control
+s4,breast,cancer
+s5,breast,cancer
+s6,breast,cancer
+s7,ovary,cancer
+s8,ovary,cancer
+s9,ovary,cancer
+s10,lung,cancer
+s11,lung,cancer
+s12,lung,cancer
 ```
 
 Then run:
@@ -352,9 +369,17 @@ another factor. A common 2x2 example is genotype by treatment:
 ```csv
 sample,genotype,treatment
 s1,WT,ctrl
-s2,WT,drug
-s3,KO,ctrl
-s4,KO,drug
+s2,WT,ctrl
+s3,WT,ctrl
+s4,WT,drug
+s5,WT,drug
+s6,WT,drug
+s7,KO,ctrl
+s8,KO,ctrl
+s9,KO,ctrl
+s10,KO,drug
+s11,KO,drug
+s12,KO,drug
 ```
 
 Use both main effects plus the interaction:
@@ -369,6 +394,12 @@ flashdeg run \
   --contrast-name "genotype[T.KO]:treatment[T.drug]" \
   --out interaction.csv
 ```
+
+The `--contrast-name` line is required here. This is not a simple
+group-versus-group comparison such as `drug` versus `ctrl`; it tests the
+interaction coefficient itself. Omitting `--contrast-name` does not mean "use
+the interaction by default" in FlashDEG. The command must include exactly one
+of `--contrast`, `--contrast-name`, or `--contrast-vector`.
 
 The shorter formula is equivalent:
 
@@ -405,7 +436,121 @@ Then choose the interaction column from `design.csv` and pass it to
 `--contrast-name`. FlashDEG uses treatment-contrast column names such as
 `A[T.level]:B[T.level]`.
 
-## 10. Advanced: Precomputed Design Matrices
+## 10. Testing A Whole Factor At Once (Likelihood-Ratio Test)
+
+The tests above are Wald tests: they compare two groups, like `treated` versus
+`control`. Sometimes you instead want a single yes/no question about a whole
+factor:
+
+```text
+Does condition matter at all, across all of its groups?
+Does the interaction matter as a whole?
+```
+
+For that, use the likelihood-ratio test (LRT). Instead of comparing two groups,
+the LRT compares two models:
+
+```text
+full model     the model with the terms you care about
+reduced model  the same model with those terms removed
+```
+
+and asks:
+
+```text
+Do the removed terms improve the model enough to matter?
+```
+
+You write the full model with `--design` and the reduced model with `--reduced`.
+The reduced model is just the full model with the terms you are testing taken
+out. Add `--test LRT` to switch from the Wald test to the LRT.
+
+### Example: does condition matter at all?
+
+Suppose `condition` has four groups (control, breast, ovary, lung) and you want
+one test for "is there ANY expression difference among these groups", instead of
+running every pairwise comparison separately:
+
+```bash
+flashdeg run \
+  --counts counts.csv \
+  --metadata metadata.csv \
+  --design "~ condition" \
+  --ref-level "condition=control" \
+  --test LRT \
+  --reduced "~ 1" \
+  --contrast "condition" "breast" "control" \
+  --out condition_lrt.csv
+```
+
+Here:
+
+```text
+full model     ~ condition   (expression can depend on condition)
+reduced model  ~ 1           (expression is the same for every group)
+```
+
+`~ 1` means "no groups, just one overall average". So the test asks whether
+knowing the condition explains anything at all.
+
+### Example: does condition matter, after adjusting for batch?
+
+Keep `batch` in both models and remove only `condition`:
+
+```bash
+flashdeg run \
+  --counts counts.csv \
+  --metadata metadata.csv \
+  --design "~ batch + condition" \
+  --ref-level "condition=CNTL" \
+  --ref-level "batch=batch1" \
+  --test LRT \
+  --reduced "~ batch" \
+  --contrast "condition" "TREATED" "CNTL" \
+  --out condition_lrt.csv
+```
+
+```text
+full model     ~ batch + condition
+reduced model  ~ batch
+```
+
+Because `batch` is in both models, it is adjusted for, and the test is only about
+`condition`.
+
+### Reading the LRT result
+
+The result table has the usual columns:
+
+```text
+gene_id,baseMean,log2FoldChange,lfcSE,stat,pvalue,padj
+```
+
+but under LRT you read them differently:
+
+```text
+pvalue / padj   answer "do the removed terms matter for this gene?"
+log2FoldChange  one comparison only, shown for reference
+```
+
+This is the most important point for beginners:
+
+```text
+The pvalue tests the whole set of removed terms together.
+The log2FoldChange shows only the single --contrast you chose.
+```
+
+So a gene can have a very small `pvalue` (the factor matters) even when its
+`log2FoldChange` looks small — the fold change is just one of the several
+comparisons the test covers. Use `pvalue` / `padj` to decide significance, and
+treat `log2FoldChange` as one representative effect size.
+
+`--contrast` (or `--contrast-name` / `--contrast-vector`) is still required: it
+only picks which fold change to display. It does not change what the test asks.
+
+Note: `--test LRT` cannot be combined with LFC shrinkage (`--lfc-shrink`).
+
+## 11. Advanced: Precomputed Design Matrices
 
 Most users should skip this section.
 

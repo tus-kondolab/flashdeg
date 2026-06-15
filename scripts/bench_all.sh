@@ -311,20 +311,51 @@ fi
 WORK_DIR="${RESULTS_DIR}/_bench_${TS}_work"
 mkdir -p "${WORK_DIR}"
 
-BENCH_DESEQ2_R="${WORK_DIR}/bench_deseq2_embedded.R"
-BENCH_PYDESEQ2_PY="${WORK_DIR}/bench_pydeseq2_embedded.py"
-BENCH_INMOOSE_PY="${WORK_DIR}/bench_inmoose_embedded.py"
-BENCH_EDGER_R="${WORK_DIR}/bench_edger_embedded.R"
+BENCH_DESEQ2_R_CODE=$(cat <<'FLASHDEG_BENCH_DESEQ2_EOF'
+# Timing-only DESeq2 R benchmark.
+#
+# Usage:
+#   Rscript tools/bench_deseq2.R <counts_csv> <metadata_csv> \
+#       --condition <col> --experiment <level> --control <level> \
+#       [--threads <n>] [--save-results <path>]
+#
+# Example (GSE174339):
+#   Rscript tools/bench_deseq2.R counts.csv metadata.csv \
+#       --condition condition --experiment BrCa --control Normal --threads 8
+#
+# Arguments:
+#   counts_csv    Path to counts CSV (gene_id as first column, samples
+#                 as remaining columns).
+#   metadata_csv  Path to metadata CSV (sample_id as first column).
+#   --condition   Metadata column holding the contrast factor.
+#   --experiment  Experimental / test level (e.g. 'BrCa').
+#   --control     Reference / control level (e.g. 'Normal').
+#                 Only rows whose condition is either experiment or
+#                 control are kept; any other levels are dropped.
+#   --threads     BiocParallel MulticoreParam(workers = N) worker count
+#                 (default: 1). Empirically optimal: any N > 1 with
+#                 DESeq(parallel = TRUE) and results(parallel = FALSE);
+#                 see docs/benchmarks.md section 6.2.
+#   --save-results Optional CSV path for the DESeq2 results table.
+#
+# Memory: wrap with /usr/bin/time -v to capture peak RSS.
+#
+# Reproducibility note: this script depends on DESeq2 and (for
+# threads > 1) BiocParallel. Recommended environment: Ubuntu /
+# WSL2 R 4.4.x with Bioconductor 3.20.
 
-write_embedded_bench_scripts() {
-    cat > "${BENCH_DESEQ2_R}" <<'RSCRIPT'
 suppressPackageStartupMessages(library(DESeq2))
 
 parse_args <- function(argv) {
-  cfg <- list(counts = NA_character_, metadata = NA_character_,
-              condition = NA_character_, experiment = NA_character_,
-              control = NA_character_, threads = 1L,
-              save_results = NA_character_)
+  cfg <- list(
+    counts = NA_character_,
+    metadata = NA_character_,
+    condition = NA_character_,
+    experiment = NA_character_,
+    control = NA_character_,
+    threads = 1L,
+    save_results = NA_character_
+  )
   positional <- character(0)
   i <- 1L
   while (i <= length(argv)) {
@@ -346,9 +377,12 @@ parse_args <- function(argv) {
     }
   }
   if (length(positional) < 2L) {
-    cat("usage: Rscript bench_deseq2_embedded.R <counts_csv> <metadata_csv> ",
-        "--condition <col> --experiment <level> --control <level> ",
-        "[--threads <n>] [--save-results <path>]\n", file = stderr())
+    cat(
+      "usage: Rscript tools/bench_deseq2.R <counts_csv> <metadata_csv> ",
+      "--condition <col> --experiment <level> --control <level> ",
+      "[--threads <n>]\n",
+      file = stderr()
+    )
     quit(status = 2)
   }
   cfg$counts <- positional[1L]
@@ -378,25 +412,29 @@ counts <- read.csv(cfg$counts, row.names = 1, check.names = FALSE)
 metadata <- read.csv(cfg$metadata, row.names = 1, check.names = FALSE)
 
 if (!(cfg$condition %in% colnames(metadata))) {
-  cat(sprintf("error: condition column '%s' not in metadata (available: %s)\n",
-              cfg$condition, paste(colnames(metadata), collapse = ", ")),
-      file = stderr())
+  cat(sprintf(
+    "error: condition column '%s' not in metadata (available: %s)\n",
+    cfg$condition, paste(colnames(metadata), collapse = ", ")
+  ), file = stderr())
   quit(status = 2)
 }
 
 keep <- metadata[[cfg$condition]] %in% c(cfg$experiment, cfg$control)
 if (sum(keep) == 0L) {
-  cat(sprintf("error: no rows match condition in {%s, %s}; available values: %s\n",
-              cfg$experiment, cfg$control,
-              paste(sort(unique(metadata[[cfg$condition]])), collapse = ", ")),
-      file = stderr())
+  cat(sprintf(
+    "error: no rows match condition in {%s, %s}; available values: %s\n",
+    cfg$experiment, cfg$control,
+    paste(sort(unique(metadata[[cfg$condition]])), collapse = ", ")
+  ), file = stderr())
   quit(status = 2)
 }
 
 counts <- counts[, keep, drop = FALSE]
 metadata <- metadata[keep, , drop = FALSE]
-metadata[[cfg$condition]] <- factor(metadata[[cfg$condition]],
-                                    levels = c(cfg$control, cfg$experiment))
+metadata[[cfg$condition]] <- factor(
+  metadata[[cfg$condition]],
+  levels = c(cfg$control, cfg$experiment)
+)
 
 stopifnot(all(rownames(metadata) == colnames(counts)))
 
@@ -414,6 +452,12 @@ t0 <- Sys.time()
 dds <- DESeqDataSetFromMatrix(countData = count_matrix,
                               colData = metadata,
                               design = design_formula)
+# Apply the empirically optimal DESeq2 threading policy (see
+# docs/benchmarks.md section 6.2):
+#   - DESeq(parallel=TRUE) when workers > 1: gives modest speedup
+#   - results(parallel=FALSE) always: BiocParallel overhead exceeds the
+#     work in independent filtering / BH adjustment / Cook filtering
+#     and consistently slows results() down by ~20% on this workload.
 dds <- DESeq(dds, quiet = TRUE, parallel = (cfg$threads > 1L))
 t_dds <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
 
@@ -428,16 +472,55 @@ if (!is.na(cfg$save_results)) {
 }
 t_res <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
 
-saved <- if (!is.na(cfg$save_results)) sprintf(" results=%s", cfg$save_results) else ""
+saved <- if (!is.na(cfg$save_results)) {
+  sprintf(" results=%s", cfg$save_results)
+} else {
+  ""
+}
 cat(sprintf(
-  paste0("threads=%d dds=%.3fs results=%.3fs total=%.3fs ",
-         "counts=%s metadata=%s condition=%s experiment=%s control=%s%s\n"),
+  paste0(
+    "threads=%d dds=%.3fs results=%.3fs total=%.3fs ",
+    "counts=%s metadata=%s condition=%s experiment=%s control=%s%s\n"
+  ),
   cfg$threads, t_dds, t_res, t_dds + t_res,
-  cfg$counts, cfg$metadata, cfg$condition, cfg$experiment, cfg$control, saved
+  cfg$counts, cfg$metadata, cfg$condition, cfg$experiment, cfg$control,
+  saved
 ))
-RSCRIPT
+FLASHDEG_BENCH_DESEQ2_EOF
+)
+BENCH_PYDESEQ2_PY_CODE=$(cat <<'FLASHDEG_BENCH_PYDESEQ2_EOF'
+"""Timing-only PyDESeq2 benchmark.
 
-    cat > "${BENCH_PYDESEQ2_PY}" <<'PYTHON'
+Usage:
+    python3 tools/bench_pydeseq2.py <counts_csv> <metadata_csv> \
+        --condition <col> --experiment <level> --control <level> \
+        [--threads <n>] [--save-results <path>]
+
+Example (GSE174339):
+    python3 tools/bench_pydeseq2.py counts.csv metadata.csv \
+        --condition condition --experiment BrCa --control Normal --threads 8
+
+Arguments:
+    counts_csv    Path to the counts CSV (gene_id as first column, samples
+                  as remaining columns).
+    metadata_csv  Path to the metadata CSV (sample_id as first column).
+    --condition   Metadata column holding the contrast factor.
+    --experiment  The experimental / test level value of that column.
+    --control     The control / reference level value of that column.
+                  Only rows whose condition is either ``experiment`` or
+                  ``control`` are kept; any other levels are dropped.
+    --threads     PyDESeq2 ``DefaultInference(n_cpus=N)`` worker count
+                  (default: 1).
+
+Prints a one-line summary of dds and wald timings. When
+``--save-results`` is supplied, writes the PyDESeq2 Wald result table.
+
+Memory: wrap with ``/usr/bin/time -v`` to capture peak RSS.
+
+Reproducibility note: this script must be run with a Python interpreter
+that has PyDESeq2 installed. When using scripts/bench_all.sh, select that
+environment with ``--py-env <conda_env>`` or activate it before running.
+"""
 import argparse
 import sys
 import time
@@ -450,14 +533,31 @@ from pydeseq2.ds import DeseqStats
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Timing-only PyDESeq2 benchmark.")
-    parser.add_argument("counts", type=Path)
-    parser.add_argument("metadata", type=Path)
-    parser.add_argument("--condition", required=True)
-    parser.add_argument("--experiment", required=True)
-    parser.add_argument("--control", required=True)
-    parser.add_argument("--threads", type=int, default=1)
-    parser.add_argument("--save-results", type=Path)
+    parser = argparse.ArgumentParser(
+        description="Timing-only PyDESeq2 benchmark."
+    )
+    parser.add_argument("counts", type=Path, help="counts CSV path")
+    parser.add_argument("metadata", type=Path, help="metadata CSV path")
+    parser.add_argument(
+        "--condition", required=True,
+        help="metadata column name (e.g. 'condition')"
+    )
+    parser.add_argument(
+        "--experiment", required=True,
+        help="experimental/test level (e.g. 'BrCa')"
+    )
+    parser.add_argument(
+        "--control", required=True,
+        help="reference/control level (e.g. 'Normal')"
+    )
+    parser.add_argument(
+        "--threads", type=int, default=1,
+        help="PyDESeq2 DefaultInference n_cpus (default: 1)"
+    )
+    parser.add_argument(
+        "--save-results", type=Path,
+        help="optional CSV path for the PyDESeq2 Wald result table"
+    )
     args = parser.parse_args()
 
     if not args.counts.is_file():
@@ -527,9 +627,41 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-PYTHON
+FLASHDEG_BENCH_PYDESEQ2_EOF
+)
+BENCH_INMOOSE_PY_CODE=$(cat <<'FLASHDEG_BENCH_INMOOSE_EOF'
+"""Timing-only InMoose deseq2 benchmark.
 
-    cat > "${BENCH_INMOOSE_PY}" <<'PYTHON'
+Usage:
+    python3 tools/bench_inmoose.py <counts_csv> <metadata_csv> \
+        --condition <col> --experiment <level> --control <level> \
+        [--threads <n>] [--save-results <path>]
+
+Example (GSE174339):
+    python3 tools/bench_inmoose.py counts.csv metadata.csv \
+        --condition condition --experiment BrCa --control Normal --threads 1
+
+Arguments:
+    counts_csv    Path to the counts CSV.
+    metadata_csv  Path to the metadata CSV.
+    --condition   Metadata column holding the contrast factor.
+    --experiment  Experimental/test level (e.g., 'BrCa').
+    --control     Reference/control level (e.g., 'Normal').
+                  Only rows whose condition is either ``experiment`` or
+                  ``control`` are kept; any other levels are dropped.
+    --threads     Reported only as metadata. InMoose 0.9.1 raises
+                  ``NotImplementedError`` for ``parallel=True``; this argument
+                  has no effect on InMoose's internal parallelism (default: 1).
+
+Prints a one-line summary of dds and results timings. When
+``--save-results`` is supplied, writes the InMoose result table.
+
+Memory: wrap with ``/usr/bin/time -v`` to capture peak RSS.
+
+Reproducibility note: this script must be run with a Python interpreter
+that has InMoose installed. When using scripts/bench_all.sh, select that
+environment with ``--py-env <conda_env>`` or activate it before running.
+"""
 import argparse
 import os
 import sys
@@ -541,14 +673,31 @@ from inmoose.deseq2 import DESeq, DESeqDataSet
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Timing-only InMoose deseq2 benchmark.")
-    parser.add_argument("counts", type=Path)
-    parser.add_argument("metadata", type=Path)
-    parser.add_argument("--condition", required=True)
-    parser.add_argument("--experiment", required=True)
-    parser.add_argument("--control", required=True)
-    parser.add_argument("--threads", type=int, default=1)
-    parser.add_argument("--save-results", type=Path)
+    parser = argparse.ArgumentParser(
+        description="Timing-only InMoose deseq2 benchmark."
+    )
+    parser.add_argument("counts", type=Path, help="counts CSV path")
+    parser.add_argument("metadata", type=Path, help="metadata CSV path")
+    parser.add_argument(
+        "--condition", required=True,
+        help="metadata column name (e.g. 'condition')"
+    )
+    parser.add_argument(
+        "--experiment", required=True,
+        help="experimental/test level (e.g. 'BrCa')"
+    )
+    parser.add_argument(
+        "--control", required=True,
+        help="reference/control level (e.g. 'Normal')"
+    )
+    parser.add_argument(
+        "--threads", type=int, default=1,
+        help="reported for parity; InMoose 0.9.1 is single-threaded only"
+    )
+    parser.add_argument(
+        "--save-results", type=Path,
+        help="optional CSV path for the InMoose result table"
+    )
     args = parser.parse_args()
 
     if not args.counts.is_file():
@@ -578,8 +727,11 @@ def main() -> None:
     metadata[args.condition] = pd.Categorical(
         metadata[args.condition], categories=[args.control, args.experiment]
     )
+
+    # InMoose expects countData as samples-by-genes (DESeq2 R-like).
     counts_t = counts.T.astype(int)
 
+    # InMoose threading via env vars (joblib / OpenBLAS).
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -590,6 +742,7 @@ def main() -> None:
         clinicalData=metadata,
         design=f"~{args.condition}",
     )
+    # InMoose 0.9.1 does not implement own parallelism.
     dds = DESeq(dds, quiet=True, parallel=False)
     t_dds = time.time() - t0
 
@@ -621,16 +774,67 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-PYTHON
+FLASHDEG_BENCH_INMOOSE_EOF
+)
+BENCH_EDGER_R_CODE=$(cat <<'FLASHDEG_BENCH_EDGER_EOF'
+# Timing-only edgeR benchmark.
+#
+# Usage:
+#   Rscript tools/bench_edger.R <counts_csv> <metadata_csv> \
+#       --condition <col> --experiment <level> --control <level> \
+#       [--threads <n>] [--save-results <path>]
+#
+# Example (GSE174339):
+#   Rscript tools/bench_edger.R counts.csv metadata.csv \
+#       --condition condition --experiment BrCa --control Normal --threads 8
+#
+# Arguments:
+#   counts_csv    Path to counts CSV (gene_id as first column, samples
+#                 as remaining columns).
+#   metadata_csv  Path to metadata CSV (sample_id as first column).
+#   --condition   Metadata column holding the contrast factor.
+#   --experiment  Experimental / test level (e.g. 'BrCa').
+#   --control     Reference / control level (e.g. 'Normal'). Only rows
+#                 whose condition is one of these two levels are kept.
+#   --threads     Recorded into the summary line but has no runtime effect.
+#                 edgeR's standard glmQLFit/glmQLFTest pipeline is
+#                 effectively single-threaded -- estimateDisp, glmQLFit,
+#                 and glmQLFTest run their C/Fortran inner loops on a
+#                 single thread, and the typical workflow does not pass
+#                 BPPARAM= to any function. BLAS-bound matrix multiplies
+#                 can be sped up by setting OPENBLAS_NUM_THREADS > 1
+#                 externally, but bench_all.sh pins those to 1 for cross-
+#                 tool fairness, so in benchmark runs edgeR consumes ~one
+#                 CPU core regardless of --threads. The flag exists so
+#                 the script signature matches bench_deseq2.R etc.
+#                 Default: 1.
+#   --save-results Optional CSV path for the edgeR result table written in
+#                 DESeq2-compatible schema:
+#                 gene_id, baseMean, log2FoldChange, lfcSE, stat, pvalue, padj.
+#
+# Memory: wrap with /usr/bin/time -v to capture peak RSS.
+#
+# Mirrors the one-line summary format of tools/bench_deseq2.R,
+# tools/bench_pydeseq2.py, tools/bench_inmoose.py, and
+# tools/bench_flashdeg.sh for cross-tool comparison.
+#
+# Reproducibility note: requires the edgeR Bioconductor package. Tested
+# with edgeR 4.x on R 4.5.x. The pipeline is the standard edgeR glmQLFit /
+# glmQLFTest workflow without filterByExpr filtering, so all input genes
+# are retained (consistent with the other bench scripts).
 
-    cat > "${BENCH_EDGER_R}" <<'RSCRIPT'
 suppressPackageStartupMessages(library(edgeR))
 
 parse_args <- function(argv) {
-  cfg <- list(counts = NA_character_, metadata = NA_character_,
-              condition = NA_character_, experiment = NA_character_,
-              control = NA_character_, threads = 1L,
-              save_results = NA_character_)
+  cfg <- list(
+    counts = NA_character_,
+    metadata = NA_character_,
+    condition = NA_character_,
+    experiment = NA_character_,
+    control = NA_character_,
+    threads = 1L,
+    save_results = NA_character_
+  )
   positional <- character(0)
   i <- 1L
   while (i <= length(argv)) {
@@ -652,9 +856,12 @@ parse_args <- function(argv) {
     }
   }
   if (length(positional) < 2L) {
-    cat("usage: Rscript bench_edger_embedded.R <counts_csv> <metadata_csv> ",
-        "--condition <col> --experiment <level> --control <level> ",
-        "[--threads <n>] [--save-results <path>]\n", file = stderr())
+    cat(
+      "usage: Rscript tools/bench_edger.R <counts_csv> <metadata_csv> ",
+      "--condition <col> --experiment <level> --control <level> ",
+      "[--threads <n>] [--save-results <path>]\n",
+      file = stderr()
+    )
     quit(status = 2)
   }
   cfg$counts <- positional[1L]
@@ -684,45 +891,53 @@ counts <- read.csv(cfg$counts, row.names = 1, check.names = FALSE)
 metadata <- read.csv(cfg$metadata, row.names = 1, check.names = FALSE)
 
 if (!(cfg$condition %in% colnames(metadata))) {
-  cat(sprintf("error: condition column '%s' not in metadata (available: %s)\n",
-              cfg$condition, paste(colnames(metadata), collapse = ", ")),
-      file = stderr())
+  cat(sprintf(
+    "error: condition column '%s' not in metadata (available: %s)\n",
+    cfg$condition, paste(colnames(metadata), collapse = ", ")
+  ), file = stderr())
   quit(status = 2)
 }
 
 keep <- metadata[[cfg$condition]] %in% c(cfg$experiment, cfg$control)
 if (sum(keep) == 0L) {
-  cat(sprintf("error: no rows match condition in {%s, %s}; available values: %s\n",
-              cfg$experiment, cfg$control,
-              paste(sort(unique(metadata[[cfg$condition]])), collapse = ", ")),
-      file = stderr())
+  cat(sprintf(
+    "error: no rows match condition in {%s, %s}; available values: %s\n",
+    cfg$experiment, cfg$control,
+    paste(sort(unique(metadata[[cfg$condition]])), collapse = ", ")
+  ), file = stderr())
   quit(status = 2)
 }
 
 counts <- counts[, keep, drop = FALSE]
 metadata <- metadata[keep, , drop = FALSE]
-metadata[[cfg$condition]] <- factor(metadata[[cfg$condition]],
-                                    levels = c(cfg$control, cfg$experiment))
+metadata[[cfg$condition]] <- factor(
+  metadata[[cfg$condition]],
+  levels = c(cfg$control, cfg$experiment)
+)
 
 stopifnot(all(rownames(metadata) == colnames(counts)))
 
 count_matrix <- as.matrix(counts)
 storage.mode(count_matrix) <- "integer"
 
+# Stage 1: DGEList construction + TMM normalization + design matrix.
 t0 <- Sys.time()
 y <- DGEList(counts = count_matrix, group = metadata[[cfg$condition]])
 y <- calcNormFactors(y)
 design <- model.matrix(~ metadata[[cfg$condition]])
 t_prep <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
 
+# Stage 2: Empirical Bayes dispersion estimation.
 t0 <- Sys.time()
 y <- estimateDisp(y, design)
 t_disp <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
 
+# Stage 3: GLM quasi-likelihood fit.
 t0 <- Sys.time()
 fit <- glmQLFit(y, design)
 t_fit <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
 
+# Stage 4: QL F-test on the contrast coefficient (experiment vs control).
 t0 <- Sys.time()
 qlf <- glmQLFTest(fit, coef = 2)
 res <- topTags(qlf, n = Inf, sort.by = "none")$table
@@ -732,30 +947,40 @@ total <- t_prep + t_disp + t_fit + t_test
 
 if (!is.na(cfg$save_results)) {
   dir.create(dirname(cfg$save_results), recursive = TRUE, showWarnings = FALSE)
+  # edgeR's QL F-test does not expose a per-coefficient standard error in
+  # topTags output. We populate the DESeq2-compatible schema with NA for
+  # lfcSE and write the F statistic into 'stat'. Consumers comparing edgeR
+  # to DESeq2 / FlashDEG should treat 'stat' as F (not Wald z) and skip
+  # lfcSE-based comparisons.
   res_df <- data.frame(
-    gene_id = rownames(res),
-    baseMean = rowMeans(count_matrix),
+    gene_id        = rownames(res),
+    baseMean       = rowMeans(count_matrix),
     log2FoldChange = res$logFC,
-    lfcSE = NA_real_,
-    stat = res$F,
-    pvalue = res$PValue,
-    padj = res$FDR,
+    lfcSE          = NA_real_,
+    stat           = res$F,
+    pvalue         = res$PValue,
+    padj           = res$FDR,
     stringsAsFactors = FALSE
   )
   write.csv(res_df, file = cfg$save_results, row.names = FALSE, na = "NA")
 }
 
-saved <- if (!is.na(cfg$save_results)) sprintf(" results=%s", cfg$save_results) else ""
-cat(sprintf(
-  paste0("threads=%d prep=%.3fs disp=%.3fs fit=%.3fs test=%.3fs total=%.3fs ",
-         "counts=%s metadata=%s condition=%s experiment=%s control=%s%s\n"),
-  cfg$threads, t_prep, t_disp, t_fit, t_test, total,
-  cfg$counts, cfg$metadata, cfg$condition, cfg$experiment, cfg$control, saved
-))
-RSCRIPT
+saved <- if (!is.na(cfg$save_results)) {
+  sprintf(" results=%s", cfg$save_results)
+} else {
+  ""
 }
-
-write_embedded_bench_scripts
+cat(sprintf(
+  paste0(
+    "threads=%d prep=%.3fs disp=%.3fs fit=%.3fs test=%.3fs total=%.3fs ",
+    "counts=%s metadata=%s condition=%s experiment=%s control=%s%s\n"
+  ),
+  cfg$threads, t_prep, t_disp, t_fit, t_test, total,
+  cfg$counts, cfg$metadata, cfg$condition, cfg$experiment, cfg$control,
+  saved
+))
+FLASHDEG_BENCH_EDGER_EOF
+)
 
 printf "timestamp\ttool\tthreads\trepeat\twall_s\tuser_cpu_s\tsys_cpu_s\tcpu_total_s\tcpu_pct\tpeak_rss_mb\texit_code\tresults_csv\tsummary\n" > "${TSV}"
 
@@ -797,11 +1022,11 @@ run_one() {
                  --profile-json "${profile_path}"
                  --quiet) ;;
         deseq2)
-            cmd=("${R_CMD[@]}" "${BENCH_DESEQ2_R}" "${COUNTS}" "${METADATA}"
+            cmd=("${R_CMD[@]}" -e "${BENCH_DESEQ2_R_CODE}" "${COUNTS}" "${METADATA}"
                  --condition "${CONDITION}" --experiment "${EXPERIMENT}" --control "${CONTROL}"
                  --threads "${tool_threads}") ;;
         pydeseq2)
-            cmd=("${PY_CMD[@]}" "${BENCH_PYDESEQ2_PY}" "${COUNTS}" "${METADATA}"
+            cmd=("${PY_CMD[@]}" -c "${BENCH_PYDESEQ2_PY_CODE}" "${COUNTS}" "${METADATA}"
                  --condition "${CONDITION}" --experiment "${EXPERIMENT}" --control "${CONTROL}"
                  --threads "${tool_threads}") ;;
         inmoose)
@@ -810,7 +1035,7 @@ run_one() {
             # recorded value reflects the actual runtime configuration
             # rather than the misleading master --threads value.
             tool_threads=1
-            cmd=("${PY_CMD[@]}" "${BENCH_INMOOSE_PY}" "${COUNTS}" "${METADATA}"
+            cmd=("${PY_CMD[@]}" -c "${BENCH_INMOOSE_PY_CODE}" "${COUNTS}" "${METADATA}"
                  --condition "${CONDITION}" --experiment "${EXPERIMENT}" --control "${CONTROL}"
                  --threads "${tool_threads}") ;;
         edger)
@@ -820,7 +1045,7 @@ run_one() {
             # 1 thread for fairness). Force tool_threads=1 to mirror
             # InMoose.
             tool_threads=1
-            cmd=("${R_CMD[@]}" "${BENCH_EDGER_R}" "${COUNTS}" "${METADATA}"
+            cmd=("${R_CMD[@]}" -e "${BENCH_EDGER_R_CODE}" "${COUNTS}" "${METADATA}"
                  --condition "${CONDITION}" --experiment "${EXPERIMENT}" --control "${CONTROL}"
                  --threads "${tool_threads}") ;;
         *)

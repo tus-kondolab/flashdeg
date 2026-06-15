@@ -13,6 +13,11 @@
 
 namespace ccdeseq2 {
 
+enum class StatisticalTestKind {
+  wald,
+  lrt,
+};
+
 struct DeseqPipelineOptions {
   CompatMode compat_mode = CompatMode::pydeseq2;
   SizeFactorFitType size_factor_fit_type = SizeFactorFitType::ratio;
@@ -38,6 +43,12 @@ struct DeseqPipelineOptions {
   bool compute_lfc_shrink = false;
   std::size_t lfc_shrink_coeff_index = 0;
   bool lfc_shrink_adapt = true;
+  // Statistical test for the result table. wald (default) keeps the existing
+  // path unchanged. lrt requires run_deseq_pipeline's reduced_design_matrix and
+  // lrt_degrees_of_freedom (= rank(full) - rank(reduced) from
+  // validate_nested_designs).
+  StatisticalTestKind test_kind = StatisticalTestKind::wald;
+  std::size_t lrt_degrees_of_freedom = 0;
   WaldTestOptions wald_options;
 };
 
@@ -48,6 +59,7 @@ struct DeseqPipelineResult {
   std::optional<DispersionPriorFit> prior;
   std::optional<MAPDispersions> map;
   std::optional<LFCFit> lfc;
+  std::optional<LFCFit> reduced_lfc;  // populated only for test_kind == lrt
   std::optional<CookOutlierResult> cooks;
   std::optional<CookReplacementResult> replacement;
   std::optional<WaldSummary> summary;
@@ -57,9 +69,14 @@ struct DeseqPipelineResult {
   double effective_max_disp = 0.0;
 };
 
+// reduced_design_matrix is required when options.test_kind == lrt and must be
+// nested within design_matrix (validate it with validate_nested_designs first and
+// pass the rank difference via options.lrt_degrees_of_freedom). It is ignored for
+// the Wald path, so existing call sites are unaffected.
 [[nodiscard]] DeseqPipelineResult run_deseq_pipeline(
     const CountMatrix& counts, const DesignMatrix& design_matrix,
     const std::vector<double>& contrast, const DeseqPipelineOptions& options,
-    ProfileReport* profile = nullptr);
+    ProfileReport* profile = nullptr,
+    const DesignMatrix* reduced_design_matrix = nullptr);
 
 }  // namespace ccdeseq2
